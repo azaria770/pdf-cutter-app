@@ -67,7 +67,7 @@ def prepare_auto_pdf():
     last_post_id = config.get("last_post_id", DEFAULT_START_ID)
     last_drive_id = config.get("last_drive_id", None)
     last_check_str = config.get("last_check_time")
-    last_title = config.get("last_title", "גיליון משכן שילה") # טעינת השם השמור
+    last_title = config.get("last_title", "גיליון_משכן_שילה") # טעינת השם השמור
 
     now = datetime.datetime.now()
     should_scrape = False
@@ -97,7 +97,7 @@ def prepare_auto_pdf():
             
             if post_link:
                 url = post_link["href"]
-                scraped_title = post_link.get_text(strip=True) # חילוץ שם הגיליון!
+                scraped_title = post_link.get_text(strip=True) 
                 
                 id_match = re.search(r'kav\.meorot\.net/(\d+)', url)
                 if id_match:
@@ -106,6 +106,11 @@ def prepare_auto_pdf():
                     if scraped_post_id > last_post_id:
                         post_res = scraper.get(url)
                         if post_res.status_code == 200:
+                            # --- התיקון: חילוץ השם המלא מתוך עמוד הפוסט ---
+                            post_soup = BeautifulSoup(post_res.text, "html.parser")
+                            h1_tag = post_soup.select_one("h1")
+                            full_title = h1_tag.get_text(strip=True) if h1_tag else scraped_title
+                            
                             drive_patterns = [
                                 r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
                                 r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)'
@@ -115,11 +120,10 @@ def prepare_auto_pdf():
                                 if match:
                                     target_drive_id = match.group(1)
                                     target_post_id = scraped_post_id
-                                    target_title = scraped_title # שמירת השם החדש
+                                    target_title = full_title # שומרים את השם המלא האמיתי!
                                     found_new = True
                                     break
 
-    # אם הקובץ קיים ואין חדש - מחזירים אותו יחד עם השם שלו
     if not found_new and os.path.exists(AUTO_CUT_PDF):
         return True, None, target_title
 
@@ -158,7 +162,7 @@ def prepare_auto_pdf():
                 "last_post_id": target_post_id,
                 "last_drive_id": target_drive_id,
                 "last_check_time": now.isoformat(),
-                "last_title": target_title # שמירת שם הגיליון בענן
+                "last_title": target_title
             })
         return True, None, target_title
     else:
@@ -213,7 +217,6 @@ def main():
     st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     
-    # עדכון הכותרת הראשית בדיוק לפי הבקשה
     st.title("הורדת סיכום הפרשה הקרובה מגיליון משכן שילה")
     
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
@@ -230,13 +233,13 @@ def main():
         if success and os.path.exists(AUTO_CUT_PDF):
             st.success("✅ הקובץ מוכן עבורך!")
             
-            # מנקים את השם המקורי מתווים שאסורים לשימוש בשמות קבצים כדי למנוע שגיאת הורדה
+            # יצירת שם קובץ תקני (ללא תווים אסורים) והוספת סיומת .pdf
             safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip() + ".pdf"
             
             with open(AUTO_CUT_PDF, "rb") as f:
-                # שימוש בשם המקורי גם בכפתור (באתר) וגם בשם הקובץ היורד
+                # התיקון: הכפתור מציג כעת בדיוק את שם הקובץ המלא שיירד למחשב
                 st.download_button(
-                    label=f"📥 הורד את: {target_title}", 
+                    label=f"📥 הורד את הקובץ: {safe_filename}", 
                     data=f, 
                     file_name=safe_filename, 
                     mime="application/pdf"
