@@ -41,11 +41,18 @@ def check_single_page(page_data):
 
 def find_page_parallel(pdf_path, template_b64, total_pages, threshold=0.7):
     tasks = [(i, pdf_path, template_b64, threshold) for i in range(total_pages)]
-    with ProcessPoolExecutor() as executor:
+    
+    # שימוש ב-max_workers כדי לא להחניק את השרת החינמי
+    with ProcessPoolExecutor(max_workers=2) as executor:
         results = list(executor.map(check_single_page, tasks))
+    
     found_pages = [idx for idx, found in results if found]
     return min(found_pages) if found_pages else -1
 
+if __name__ == "__main__":
+    # זהו הקו המפריד הקריטי שמונע מהאפליקציה לקרוס בענן
+    main()
+    
 def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_image_b64):
     doc = fitz.open(input_pdf_path)
     total_pages = len(doc)
@@ -159,3 +166,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
