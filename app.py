@@ -67,7 +67,7 @@ def prepare_auto_pdf():
     last_post_id = config.get("last_post_id", DEFAULT_START_ID)
     last_drive_id = config.get("last_drive_id", None)
     last_check_str = config.get("last_check_time")
-    last_title = config.get("last_title", "mishkan_shilo_ready") # טעינת השם השמור
+    last_title = config.get("last_title", "גיליון משכן שילה") # טעינת השם השמור
 
     now = datetime.datetime.now()
     should_scrape = False
@@ -210,9 +210,11 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
 # --- ממשק משתמש ---
 
 def main():
-    st.set_page_config(page_title="חותך PDF אוטומטי", page_icon="✂️")
+    st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
-    st.title("✂️ חיתוך PDF לפי סימנים")
+    
+    # עדכון הכותרת הראשית בדיוק לפי הבקשה
+    st.title("הורדת סיכום הפרשה הקרובה מגיליון משכן שילה")
     
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("שליפה אוטומטית (משכן שילה)", 
@@ -226,14 +228,15 @@ def main():
             success, error_msg, target_title = prepare_auto_pdf()
         
         if success and os.path.exists(AUTO_CUT_PDF):
-            st.success(f"✅ הקובץ '{target_title}' מוכן עבורך!")
+            st.success("✅ הקובץ מוכן עבורך!")
             
-            # ניקוי שם הקובץ מתווים שאסורים לשמירה בווינדוס/מאק
-            safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title) + ".pdf"
+            # מנקים את השם המקורי מתווים שאסורים לשימוש בשמות קבצים כדי למנוע שגיאת הורדה
+            safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip() + ".pdf"
             
             with open(AUTO_CUT_PDF, "rb") as f:
+                # שימוש בשם המקורי גם בכפתור (באתר) וגם בשם הקובץ היורד
                 st.download_button(
-                    label="📥 לחץ כאן להורדת הגיליון", 
+                    label=f"📥 הורד את: {target_title}", 
                     data=f, 
                     file_name=safe_filename, 
                     mime="application/pdf"
@@ -291,8 +294,11 @@ def main():
                         output_path = input_path.replace(".pdf", "_fixed.pdf")
                         if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
                             st.success("החיתוך בוצע בהצלחה!")
+                            
+                            safe_manual_name = uploaded_file.name.replace(".pdf", "_fixed.pdf") if uploaded_file else "document_fixed.pdf"
+                            
                             with open(output_path, "rb") as f:
-                                st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
+                                st.download_button("📥 הורד קובץ חתוך", f, safe_manual_name, "application/pdf")
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                 
