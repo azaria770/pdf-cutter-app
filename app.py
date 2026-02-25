@@ -10,29 +10,93 @@ import re
 import cloudscraper
 import json
 import urllib.parse
+import datetime
+import requests # ספרייה חדשה לתקשורת עם מסד הנתונים בענן
 
-# --- פונקציות סריקה מקוונת ---
+# --- פונקציות סריקה מקוונת (מחוברות למסד נתונים בענן) ---
 
-CONFIG_FILE = "config.json"
 DEFAULT_START_ID = 72680
 
+def get_config():
+    """שולף את הנתונים ממסד הנתונים בענן (JSONBin)"""
+    try:
+        # מוודא שהמשתמש הזין את המפתחות בהגדרות של Streamlit
+        if 'JSONBIN_BIN_ID' in st.secrets and 'JSONBIN_API_KEY' in st.secrets:
+            url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
+            headers = {'X-Master-Key': st.secrets['JSONBIN_API_KEY']}
+            req = requests.get(url, headers=headers)
+            if req.status_code == 200:
+                return req.json().get('record', {})
+        else:
+            st.write("ℹ️ דיבוג: לא הוגדרו מפתחות מסד נתונים (Secrets), מתחיל מברירת מחדל.")
+    except Exception as e:
+        st.warning(f"שגיאה בקריאה ממסד הנתונים: {e}")
+    return {}
+
+def save_config(data):
+    """שומר את הנתונים למסד הנתונים בענן (JSONBin)"""
+    try:
+        if 'JSONBIN_BIN_ID' in st.secrets and 'JSONBIN_API_KEY' in st.secrets:
+            url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
+            headers = {
+                'Content-Type': 'application/json',
+                'X-Master-Key': st.secrets['JSONBIN_API_KEY']
+            }
+            requests.put(url, json=data, headers=headers)
+        else:
+            st.warning("⚠️ לא הוגדרו מפתחות למסד הנתונים ב-Secrets. המיקום החדש לא נשמר בענן.")
+    except Exception as e:
+        st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
+
+def get_next_saturday_noon(from_date):
+    """
+    פונקציית עזר המחשבת מתי תחול שבת בשעה 12:00 בצהריים 
+    מיד לאחר התאריך שסופק לה.
+    """
+    days_ahead = 5 - from_date.weekday()
+    if days_ahead < 0 or (days_ahead == 0 and from_date.hour >= 12):
+        days_ahead += 7
+    next_sat = from_date + datetime.timedelta(days=days_ahead)
+    return next_sat.replace(hour=12, minute=0, second=0, microsecond=0)
+
 def get_latest_mishkan_shilo_drive_link():
-    st.info("🛠️ יומן סריקה: מחפש קישור גוגל דרייב בקוד הדף...")
+    st.info("🛠️ יומן סריקה: בודק מהו הגיליון הרלוונטי (מול מסד הנתונים בענן)...")
     
     current_id = DEFAULT_START_ID
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                data = json.load(f)
-                current_id = data.get("last_id", DEFAULT_START_ID)
-        except: pass
+    search_start_id = DEFAULT_START_ID
+    found_date_str = None
+    
+    # 1. קריאת הנתונים השמורים ממסד הנתונים ברשת
+    data = get_config()
+    current_id = data.get("last_id", DEFAULT_START_ID)
+    found_date_str = data.get("found_date")
 
+    # 2. חישוב תזמון (האם עברה שבת בצהריים?)
+    if found_date_str:
+        try:
+            found_date = datetime.datetime.fromisoformat(found_date_str)
+            next_sat_noon = get_next_saturday_noon(found_date)
+            
+            if datetime.datetime.now() >= next_sat_noon:
+                # עברה שבת - מתחילים לחפש החל מהמספר הבא!
+                search_start_id = current_id + 1
+                st.write(f"🕒 עברה שבת בצהריים! מדלג על הישן ומתחיל לחפש החל מ-{search_start_id}...")
+            else:
+                # עדיין באותו שבוע
+                search_start_id = current_id
+                st.write(f"🕒 עדיין לא עברה שבת בצהריים. מושך את הגיליון השמור ({search_start_id}).")
+        except:
+            search_start_id = current_id
+    else:
+        search_start_id = current_id
+
+    # 3. תהליך הסריקה
     try:
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         max_attempts = 50 
         
         for i in range(0, max_attempts):
-            test_id = current_id + i
+            test_id = search_start_id + i
             test_url = f"https://kav.meorot.net/{test_id}/"
             st.write(f"🔍 סורק את {test_url}...")
             
@@ -53,10 +117,13 @@ def get_latest_mishkan_shilo_drive_link():
                         break
                 
                 if found_id:
-                    st.success(f"✅ נמצא מזהה קובץ (ID): {found_id}")
+                    st.success(f"✅ נמצא מזהה קובץ (ID) במספר {test_id}: {found_id}")
                     
-                    with open(CONFIG_FILE, "w") as f:
-                        json.dump({"last_id": test_id}, f)
+                    # שומרים את ה-ID החדש יחד עם חותמת הזמן למסד הנתונים בענן!
+                    save_config({
+                        "last_id": test_id,
+                        "found_date": datetime.datetime.now().isoformat()
+                    })
                     
                     return found_id
                 else:
@@ -139,7 +206,6 @@ def main():
                               "קישור מ-Google Drive", 
                               "שליפה אוטומטית (משכן שילה)"))
     
-    # --- התיקון: השדות מוצגים למשתמש לפני שהוא לוחץ על הכפתור ---
     uploaded_file = None
     manual_link = ""
     
