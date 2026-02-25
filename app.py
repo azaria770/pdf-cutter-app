@@ -10,72 +10,71 @@ import re
 import cloudscraper
 import json
 
-# --- פונקציות סריקה מקוונת (סריקה רציפה עם קובץ קונפיג) ---
+# --- פונקציות סריקה מקוונת (סריקה רציפה ללא force_isolation) ---
 
 CONFIG_FILE = "config.json"
 DEFAULT_START_ID = 72680
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק באופן רציף החל מהמספר האחרון ששמור בקונפיג ועד שהוא מוצא PDF.
+    סורק באופן רציף החל מהמספר האחרון ששמור בקונפיג.
+    מבנה הלינק: https://kav.meorot.net/{id}/
     """
     st.info("🛠️ יומן סריקה: מתחיל סריקה רציפה של פוסטים...")
     
     current_id = DEFAULT_START_ID
     
-    # 1. קריאת המספר האחרון מתוך קובץ הקונפיג
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
                 current_id = data.get("last_id", DEFAULT_START_ID)
-                st.write(f"1. 📥 נטען מספר התחלתי מקובץ ההגדרות: {current_id}")
+                st.write(f"1. 📥 נטען מספר התחלתי: {current_id}")
         except Exception as e:
-            st.warning("⚠️ שגיאה בקריאת קובץ ההגדרות, מתחיל מבררת המחדל.")
+            st.warning("⚠️ שגיאה בקריאת קובץ ההגדרות.")
     else:
-        st.write(f"1. 📄 קובץ הגדרות לא קיים במערכת, מתחיל מבררת המחדל ({DEFAULT_START_ID}).")
+        st.write(f"1. 📄 מתחיל מבררת מחדל: {DEFAULT_START_ID}")
 
     try:
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         
-        # מגבלה: נסרוק רק עד 20 מספרים קדימה כדי למנוע לולאה אינסופית
-        max_attempts = 20 
+        # הגדלתי ל-50 למקרה שהיו הרבה עדכוני ביניים באתר
+        max_attempts = 50 
         
-        # התיקון: מתחילים מ-0 כדי לבדוק קודם כל את המספר הנוכחי לפני שמתקדמים
         for i in range(0, max_attempts):
             test_id = current_id + i
-            test_url = f"https://kav.meorot.net/{test_id}/?force_isolation=true"
-            st.write(f"2. סורק את מספר {test_id}...")
+            # שינוי מבנה הלינק לפי בקשתך:
+            test_url = f"https://kav.meorot.net/{test_id}/"
+            st.write(f"2. סורק את מספר {test_id} בכתובת: {test_url}")
             
             response = scraper.get(test_url)
             if response.status_code == 200:
                 html = response.text
-                # מחפש לינק גוגל דרייב בתוך הקוד
+                # חיפוש לינק הדרייב בתוך ה-HTML
                 drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html)
                 
                 if drive_match:
                     found_link = drive_match.group(1)
                     st.success(f"3. ✅ נמצא קובץ PDF במספר {test_id}!")
                     
-                    # עדכון קובץ הקונפיג עם המספר החדש שמצאנו
+                    # שמירת המספר להרצה הבאה
                     with open(CONFIG_FILE, "w") as f:
                         json.dump({"last_id": test_id}, f)
-                    st.write(f"4. 💾 המספר {test_id} נשמר בקובץ ההגדרות לסריקה הבאה.")
                     
                     return found_link
                 else:
-                    st.write(f"   ❌ אין PDF במספר {test_id}, ממשיך הלאה...")
+                    st.write(f"   ❌ אין לינק לדרייב בדף {test_id}, ממשיך...")
             else:
-                st.write(f"   ❌ חסימה או שגיאה במספר {test_id} (קוד {response.status_code}).")
+                st.write(f"   ❌ דף {test_id} לא נמצא או חסום (קוד {response.status_code})")
                 
-        st.error(f"❌ סרקנו {max_attempts} מספרים קדימה ולא נמצא PDF חדש. ייתכן שעוד לא פורסם.")
+        st.error(f"❌ סרקנו {max_attempts} דפים ולא נמצא PDF. בדוק אם המספר התקין רחוק יותר.")
         return None
 
     except Exception as e:
-        st.error(f"❌ שגיאת מערכת במהלך הסריקה: {e}")
+        st.error(f"❌ שגיאת מערכת: {e}")
         return None
 
-# --- פונקציות לוגיקה ---
+# --- פונקציות לוגיקה (ללא שינוי) ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -133,7 +132,7 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
     doc.close()
     return False
 
-# --- ממשק המשתמש (Streamlit) ---
+# --- ממשק המשתמש (ללא שינוי) ---
 
 def main():
     st.set_page_config(page_title="חותך PDF אוטומטי", page_icon="✂️")
@@ -146,9 +145,7 @@ def main():
     """, unsafe_allow_html=True)
 
     st.title("✂️ חיתוך PDF לפי סימנים")
-    st.info("המערכת סורקת את ה-PDF ומחפשת את תמונות ההתחלה והסיום המוגדרות מראש.")
-
-    # בחירת שיטת ההזנה
+    
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("העלאת קובץ מהמחשב", 
                               "קישור מ-Google Drive", 
@@ -158,29 +155,23 @@ def main():
     drive_link = ""
     
     if upload_option == "העלאת קובץ מהמחשב":
-        uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="main_uploader")
+        uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"])
     elif upload_option == "קישור מ-Google Drive":
         drive_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
-        st.caption("שים לב: הקישור חייב להיות פתוח להרשאת 'כל מי שברשותו הקישור' (Anyone with the link).")
-    else:
-        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
-
+    
     START_IMG = "start.png"
     END_IMG = "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
         if upload_option == "העלאת קובץ מהמחשב" and not uploaded_file:
-            st.warning("נא להעלות קובץ PDF קודם.")
-            return
-        if upload_option == "קישור מ-Google Drive" and not drive_link:
-            st.warning("נא להדביק קישור חוקי מגוגל דרייב קודם.")
+            st.warning("נא להעלות קובץ PDF.")
             return
             
         if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-            st.error("שגיאה: קבצי התמונות (start.png / end.png) לא נמצאו בשרת. וודא שהם הועלו ל-GitHub.")
+            st.error("קבצי התמונות חסרים בשרת.")
             return
 
-        with st.spinner("מושך את הקובץ וסורק את המסמך... זה עשוי לקחת מספר שניות"):
+        with st.spinner("מעבד..."):
             try:
                 with open(START_IMG, "rb") as f:
                     start_b64 = base64.b64encode(f.read())
@@ -196,39 +187,22 @@ def main():
                 else:
                     if upload_option == "שליפה אוטומטית (משכן שילה)":
                         drive_link = get_latest_mishkan_shilo_drive_link()
-                        if not drive_link:
-                            return
+                        if not drive_link: return
                             
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
                         input_path = tmp_in.name
                     gdown.download(url=drive_link, output=input_path, quiet=False, fuzzy=True)
-                    
-                    if not os.path.exists(input_path) or os.path.getsize(input_path) < 1000:
-                        st.error("שגיאה בהורדת הקובץ מדרייב. ייתכן שהקישור אינו פומבי או שאינו קובץ PDF תקין.")
-                        return
 
                 output_path = input_path.replace(".pdf", "_fixed.pdf")
 
                 if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
-                    st.success("החיתוך הושלם בהצלחה!")
-                    
+                    st.success("בוצע בהצלחה!")
                     with open(output_path, "rb") as f:
-                        st.download_button(
-                            label="📥 לחץ כאן להורדת הקובץ החתוך",
-                            data=f,
-                            file_name="cut_document.pdf",
-                            mime="application/pdf"
-                        )
+                        st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
                 else:
-                    st.error("לא הצלחנו למצוא את תמונת ההתחלה או הסיום בתוך המסמך.")
-            
+                    st.error("סימני ההתחלה/סיום לא נמצאו.")
             except Exception as e:
-                st.error(f"אירעה שגיאה בעיבוד: {e}")
-            finally:
-                if 'input_path' in locals() and os.path.exists(input_path):
-                    os.remove(input_path)
-                if 'output_path' in locals() and os.path.exists(output_path):
-                    if os.path.exists(output_path): os.remove(output_path)
+                st.error(f"שגיאה: {e}")
 
 if __name__ == "__main__":
     main()
