@@ -9,45 +9,52 @@ import gdown
 import urllib.request
 import re
 
-# --- פונקציות סריקה מקוונת (משופר ואגרסיבי יותר) ---
+# --- פונקציות סריקה מקוונת (משופר עם יומן דיבוג) ---
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק את אתר המאורות באופן אגרסיבי, מוצא את המספר הגבוה ביותר, 
-    נכנס לפוסט ושולף את קישור הגוגל דרייב גם אם הוא חבוי בקוד.
+    סורק את אתר המאורות תוך הצגת שלבי הסריקה למשתמש (Debug)
+    כדי שנוכל להבין בדיוק איפה התהליך נעצר.
     """
+    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני...")
     try:
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        # הוספת User-Agent מלא של כרום כדי למנוע חסימות אבטחה של האתר
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
         
-        # 1. שליפת עמוד הקטגוריה
+        st.write("1. מושך נתונים מעמוד הקטגוריה הראשי...")
         req = urllib.request.Request(category_url, headers=headers)
         with urllib.request.urlopen(req) as response:
             html = response.read().decode('utf-8')
         
-        # 2. מציאת מספרי פוסטים - חיפוש גמיש יותר
         post_ids = re.findall(r'kav\.meorot\.net/(\d+)', html)
         if not post_ids:
+            st.error("❌ דיבוג: לא נמצאו מספרים בעמוד הראשי. ייתכן שהאתר חסם את הבקשה או שכתובת האתר השתנתה.")
             return None
+            
+        unique_ids = list(set(post_ids))
+        st.write(f"2. המספרים שנמצאו באתר: {unique_ids}")
         
-        # 3. מציאת המספר הגבוה ביותר ובניית הקישור אליו
         latest_id = max(int(pid) for pid in post_ids)
         latest_post_url = f"https://kav.meorot.net/{latest_id}/"
+        st.write(f"3. המספר הגבוה ביותר שנבחר הוא {latest_id}. נכנס לעמוד הפוסט...")
         
-        # 4. כניסה לפוסט הרלוונטי
         req2 = urllib.request.Request(latest_post_url, headers=headers)
         with urllib.request.urlopen(req2) as response2:
             html2 = response2.read().decode('utf-8')
             
-        # 5. חילוץ קישור גוגל דרייב - חיפוש אגרסיבי למזהה (ID) של הקובץ
-        drive_match = re.search(r'(https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+)', html2)
+        # הרחבנו את החיפוש שיתפוס כל קישור שמתחיל ב-https://drive.google.com/file 
+        drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html2)
         if drive_match:
-            return drive_match.group(1)
-            
-        return None
+            found_link = drive_match.group(1)
+            st.success(f"4. ✅ נמצא קישור גוגל דרייב: {found_link}")
+            return found_link
+        else:
+            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה, אבל לא נמצא בתוכו טקסט שמתחיל ב-https://drive.google.com/file")
+            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט (לחיפוש הקישור האמיתי)"):
+                st.text(html2) # מציג את כל קוד העמוד כדי שתוכל לחפש בו ידנית
+            return None
     except Exception as e:
-        print(f"Error fetching auto link: {e}")
+        st.error(f"❌ שגיאת מערכת במהלך הסריקה: {e}")
         return None
 
 # --- פונקציות לוגיקה ---
@@ -86,7 +93,6 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        # נשאר: קיצור זמן הסריקה על ידי הקטנת מטריצת הרינדור מ-2.0 ל-1.2
         pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
 
         if start_page == -1:
@@ -170,11 +176,10 @@ def main():
                         tmp_in.write(uploaded_file.getvalue())
                         input_path = tmp_in.name
                 else:
-                    # שימוש בגוגל דרייב - רגיל או אוטומטי
                     if upload_option == "שליפה אוטומטית (משכן שילה)":
                         drive_link = get_latest_mishkan_shilo_drive_link()
                         if not drive_link:
-                            st.error("שגיאה: לא הצלחנו לאתר את קובץ ה-PDF (קישור דרייב) בעמוד העדכני ביותר.")
+                            # הודעת שגיאה כללית הוסרה מכאן כי יומן הסריקה כבר מציג את הסיבה
                             return
                             
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
