@@ -17,9 +17,6 @@ CONFIG_FILE = "config.json"
 DEFAULT_START_ID = 72680
 
 def get_latest_mishkan_shilo_drive_link():
-    """
-    סורק דפים ומחפש לינק לדרייב. במקום להחזיר לינק מלא, נחזיר רק את ה-ID.
-    """
     st.info("🛠️ יומן סריקה: מחפש קישור גוגל דרייב בקוד הדף...")
     
     current_id = DEFAULT_START_ID
@@ -52,7 +49,7 @@ def get_latest_mishkan_shilo_drive_link():
                 for pattern in drive_patterns:
                     match = re.search(pattern, html)
                     if match:
-                        found_id = match.group(1) # לוקחים רק את ה-ID, לא את כל הלינק
+                        found_id = match.group(1)
                         break
                 
                 if found_id:
@@ -72,7 +69,7 @@ def get_latest_mishkan_shilo_drive_link():
         st.error(f"❌ שגיאה בסריקה: {e}")
         return None
 
-# --- פונקציות לוגיקה (ללא שינוי) ---
+# --- פונקציות לוגיקה ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -142,6 +139,17 @@ def main():
                               "קישור מ-Google Drive", 
                               "שליפה אוטומטית (משכן שילה)"))
     
+    # --- התיקון: השדות מוצגים למשתמש לפני שהוא לוחץ על הכפתור ---
+    uploaded_file = None
+    manual_link = ""
+    
+    if upload_option == "העלאת קובץ מהמחשב":
+        uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="manual_upload")
+    elif upload_option == "קישור מ-Google Drive":
+        manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
+    else:
+        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
+    
     START_IMG, END_IMG = "start.png", "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
@@ -157,50 +165,55 @@ def main():
                 input_path = ""
                 
                 if upload_option == "העלאת קובץ מהמחשב":
-                    uploaded_file = st.file_uploader("בחר קובץ", type=["pdf"], key="manual_upload")
                     if not uploaded_file:
                         st.warning("נא להעלות קובץ.")
                         return
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         tmp.write(uploaded_file.getvalue())
                         input_path = tmp.name
-                else:
-                    file_id = None
-                    if upload_option == "שליפה אוטומטית (משכן שילה)":
-                        file_id = get_latest_mishkan_shilo_drive_link()
-                    else: 
-                        manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
-                        if manual_link:
-                            # חילוץ ה-ID מהלינק הידני
-                            id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
-                            if id_match:
-                                file_id = id_match.group(1)
+                
+                elif upload_option == "קישור מ-Google Drive":
+                    if not manual_link:
+                        st.warning("נא להזין לינק.")
+                        return
                     
+                    file_id = None
+                    id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
+                    if id_match:
+                        file_id = id_match.group(1)
+                    else:
+                        st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
+                        return
+                        
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                        input_path = tmp.name
+                    gdown.download(id=file_id, output=input_path, quiet=False)
+
+                elif upload_option == "שליפה אוטומטית (משכן שילה)":
+                    file_id = get_latest_mishkan_shilo_drive_link()
                     if not file_id: 
-                        st.warning("לא נמצא מזהה קובץ תקין להורדה.")
                         return
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         input_path = tmp.name
                     
-                    # הורדה ישירה לפי ID (עוקף דפי HTML של גוגל)
                     gdown.download(id=file_id, output=input_path, quiet=False)
 
-                    # --- שורת הדיבוג החדשה ---
                     file_size = os.path.getsize(input_path)
                     st.write(f"🔍 דיבוג: גודל הקובץ שהורד מגוגל הוא {file_size / 1024:.2f} KB")
                     
-                    if file_size < 100000: # קובץ ששוקל פחות מ-100KB הוא כנראה לא העלון
-                        st.error("⚠️ הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה האוטומטית והחזיר דף שגיאה/אזהרה במקום את ה-PDF האמיתי.")
+                    if file_size < 100000:
+                        st.error("⚠️ הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.")
                         return
 
-                output_path = input_path.replace(".pdf", "_fixed.pdf")
-                if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
-                    st.success("החיתוך בוצע בהצלחה!")
-                    with open(output_path, "rb") as f:
-                        st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
-                else:
-                    st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
+                if input_path:
+                    output_path = input_path.replace(".pdf", "_fixed.pdf")
+                    if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
+                        st.success("החיתוך בוצע בהצלחה!")
+                        with open(output_path, "rb") as f:
+                            st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
+                    else:
+                        st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
             
             except Exception as e:
                 st.error(f"אירעה שגיאה: {e}")
