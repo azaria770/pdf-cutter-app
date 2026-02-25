@@ -9,26 +9,38 @@ import gdown
 import urllib.request
 import re
 
-# --- פונקציות סריקה מקוונת (משופר עם יומן דיבוג) ---
+# --- פונקציות סריקה מקוונת (משופר עם עקיפת חסימת 403) ---
 
 def get_latest_mishkan_shilo_drive_link():
     """
     סורק את אתר המאורות תוך הצגת שלבי הסריקה למשתמש (Debug)
-    כדי שנוכל להבין בדיוק איפה התהליך נעצר.
+    ומשתמש בתחפושת דפדפן מלאה כדי לעקוף חסימות רובוטים.
     """
     st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני...")
     try:
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
         
-        st.write("1. מושך נתונים מעמוד הקטגוריה הראשי...")
+        # התחפושת החדשה: מדמה דפדפן אמיתי במאת האחוזים כדי למנוע שגיאת 403
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Sec-Fetch-User': '?1'
+        }
+        
+        st.write("1. מתחזה לדפדפן ומושך נתונים מעמוד הקטגוריה הראשי...")
         req = urllib.request.Request(category_url, headers=headers)
         with urllib.request.urlopen(req) as response:
             html = response.read().decode('utf-8')
         
         post_ids = re.findall(r'kav\.meorot\.net/(\d+)', html)
         if not post_ids:
-            st.error("❌ דיבוג: לא נמצאו מספרים בעמוד הראשי. ייתכן שהאתר חסם את הבקשה או שכתובת האתר השתנתה.")
+            st.error("❌ דיבוג: העמוד נטען אך לא נמצאו בו מספרים. ייתכן שכתובת האתר השתנתה.")
             return None
             
         unique_ids = list(set(post_ids))
@@ -42,16 +54,15 @@ def get_latest_mishkan_shilo_drive_link():
         with urllib.request.urlopen(req2) as response2:
             html2 = response2.read().decode('utf-8')
             
-        # הרחבנו את החיפוש שיתפוס כל קישור שמתחיל ב-https://drive.google.com/file 
         drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html2)
         if drive_match:
             found_link = drive_match.group(1)
             st.success(f"4. ✅ נמצא קישור גוגל דרייב: {found_link}")
             return found_link
         else:
-            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה, אבל לא נמצא בתוכו טקסט שמתחיל ב-https://drive.google.com/file")
-            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט (לחיפוש הקישור האמיתי)"):
-                st.text(html2) # מציג את כל קוד העמוד כדי שתוכל לחפש בו ידנית
+            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה (ללא חסימה!), אבל לא נמצא בתוכו קישור לגוגל דרייב.")
+            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט"):
+                st.text(html2)
             return None
     except Exception as e:
         st.error(f"❌ שגיאת מערכת במהלך הסריקה: {e}")
@@ -130,7 +141,7 @@ def main():
     st.title("✂️ חיתוך PDF לפי סימנים")
     st.info("המערכת סורקת את ה-PDF ומחפשת את תמונות ההתחלה והסיום המוגדרות מראש.")
 
-    # בחירת שיטת ההזנה כולל האופציה החדשה
+    # בחירת שיטת ההזנה
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("העלאת קובץ מהמחשב", 
                               "קישור מ-Google Drive", 
@@ -179,7 +190,6 @@ def main():
                     if upload_option == "שליפה אוטומטית (משכן שילה)":
                         drive_link = get_latest_mishkan_shilo_drive_link()
                         if not drive_link:
-                            # הודעת שגיאה כללית הוסרה מכאן כי יומן הסריקה כבר מציג את הסיבה
                             return
                             
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
