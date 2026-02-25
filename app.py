@@ -11,14 +11,14 @@ import cloudscraper
 import json
 import urllib.parse
 
-# --- פונקציות סריקה מקוונת (תמיכה בלינקים מתמונות) ---
+# --- פונקציות סריקה מקוונת ---
 
 CONFIG_FILE = "config.json"
 DEFAULT_START_ID = 72680
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק דפים ומחפש לינק לדרייב, כולל לינקים שמוצמדים לתמונות או כפתורים.
+    סורק דפים ומחפש לינק לדרייב. במקום להחזיר לינק מלא, נחזיר רק את ה-ID.
     """
     st.info("🛠️ יומן סריקה: מחפש קישור גוגל דרייב בקוד הדף...")
     
@@ -43,32 +43,25 @@ def get_latest_mishkan_shilo_drive_link():
             if response.status_code == 200:
                 html = response.text
                 
-                # חיפוש לינק דרייב בכל וריאציה (חשוף, בתוך href, או בתוך url מקודד)
-                # הביטוי הרגולרי הזה מחפש כל מה שמתחיל בכתובת של דרייב ונגמר בסימן סגירה של לינק
                 drive_patterns = [
-                    r'https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+', # לינק נקי
-                    r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F[a-zA-Z0-9_-]+' # לינק מקודד (בתוך URL אחר)
+                    r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
+                    r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)' 
                 ]
                 
-                found_url = None
+                found_id = None
                 for pattern in drive_patterns:
                     match = re.search(pattern, html)
                     if match:
-                        found_url = match.group(0)
-                        # אם זה מקודד, נפענח
-                        if "%3A" in found_url:
-                            found_url = urllib.parse.unquote(found_url)
+                        found_id = match.group(1) # לוקחים רק את ה-ID, לא את כל הלינק
                         break
                 
-                if found_url:
-                    # ניקוי סיומות מיותרות כדי ש-gdown יעבוד חלק
-                    found_url = found_url.split('/view')[0].split('?')[0]
-                    st.success(f"✅ נמצא קישור: {found_url}")
+                if found_id:
+                    st.success(f"✅ נמצא מזהה קובץ (ID): {found_id}")
                     
                     with open(CONFIG_FILE, "w") as f:
                         json.dump({"last_id": test_id}, f)
                     
-                    return found_url
+                    return found_id
                 else:
                     st.write(f"   ⚠️ לא נמצא קישור לדרייב בדף {test_id}.")
             else:
@@ -152,20 +145,17 @@ def main():
     START_IMG, END_IMG = "start.png", "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
-        # בדיקה אם התמונות קיימות
         if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
             st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
             return
 
         with st.spinner("מבצע תהליך שליפה וחיתוך..."):
             try:
-                # טעינת תמונות בסיס
                 with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
                 with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
 
                 input_path = ""
                 
-                # טיפול במקור הקובץ
                 if upload_option == "העלאת קובץ מהמחשב":
                     uploaded_file = st.file_uploader("בחר קובץ", type=["pdf"], key="manual_upload")
                     if not uploaded_file:
@@ -175,21 +165,35 @@ def main():
                         tmp.write(uploaded_file.getvalue())
                         input_path = tmp.name
                 else:
+                    file_id = None
                     if upload_option == "שליפה אוטומטית (משכן שילה)":
-                        final_link = get_latest_mishkan_shilo_drive_link()
-                    else: # Google Drive Link ידני
-                        final_link = st.session_state.get('manual_link', '')
-                        if not final_link:
-                            st.warning("נא להזין לינק.")
-                            return
+                        file_id = get_latest_mishkan_shilo_drive_link()
+                    else: 
+                        manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
+                        if manual_link:
+                            # חילוץ ה-ID מהלינק הידני
+                            id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
+                            if id_match:
+                                file_id = id_match.group(1)
                     
-                    if not final_link: return
+                    if not file_id: 
+                        st.warning("לא נמצא מזהה קובץ תקין להורדה.")
+                        return
                     
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                         input_path = tmp.name
-                    gdown.download(url=final_link, output=input_path, quiet=False, fuzzy=True)
+                    
+                    # הורדה ישירה לפי ID (עוקף דפי HTML של גוגל)
+                    gdown.download(id=file_id, output=input_path, quiet=False)
 
-                # ביצוע החיתוך
+                    # --- שורת הדיבוג החדשה ---
+                    file_size = os.path.getsize(input_path)
+                    st.write(f"🔍 דיבוג: גודל הקובץ שהורד מגוגל הוא {file_size / 1024:.2f} KB")
+                    
+                    if file_size < 100000: # קובץ ששוקל פחות מ-100KB הוא כנראה לא העלון
+                        st.error("⚠️ הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה האוטומטית והחזיר דף שגיאה/אזהרה במקום את ה-PDF האמיתי.")
+                        return
+
                 output_path = input_path.replace(".pdf", "_fixed.pdf")
                 if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
                     st.success("החיתוך בוצע בהצלחה!")
