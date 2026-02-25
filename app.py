@@ -6,6 +6,47 @@ import base64
 import tempfile
 import streamlit as st
 import gdown
+import urllib.request
+import re
+
+# --- פונקציות סריקה מקוונת (חדש) ---
+
+def get_latest_mishkan_shilo_drive_link():
+    """
+    סורק את אתר המאורות, מוצא את המספר הגבוה ביותר, 
+    נכנס לפוסט ושולף את קישור הגוגל דרייב.
+    """
+    try:
+        # 1. שליפת עמוד הקטגוריה
+        category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
+        req = urllib.request.Request(category_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req) as response:
+            html = response.read().decode('utf-8')
+        
+        # 2. מציאת כל מספרי הפוסטים (הנתיבים עם המספרים)
+        post_ids = re.findall(r'https://kav\.meorot\.net/(\d+)/', html)
+        if not post_ids:
+            return None
+        
+        # 3. מציאת המספר הגבוה ביותר ובניית הקישור אליו
+        latest_id = max(int(pid) for pid in post_ids)
+        latest_post_url = f"https://kav.meorot.net/{latest_id}/"
+        
+        # 4. כניסה לפוסט הרלוונטי
+        req2 = urllib.request.Request(latest_post_url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req2) as response2:
+            html2 = response2.read().decode('utf-8')
+            
+        # 5. חילוץ קישור גוגל דרייב
+        drive_links = re.findall(r'(https://drive\.google\.com/file[^"\']+)', html2)
+        if not drive_links:
+            return None
+            
+        return drive_links[0]
+    except Exception as e:
+        print(f"Error fetching auto link: {e}")
+        return None
+
 
 # --- פונקציות לוגיקה ---
 
@@ -81,17 +122,22 @@ def main():
     st.title("✂️ חיתוך PDF לפי סימנים")
     st.info("המערכת סורקת את ה-PDF ומחפשת את תמונות ההתחלה והסיום המוגדרות מראש.")
 
-    # בחירת שיטת ההזנה
-    upload_option = st.radio("איך תרצה לטעון את ה-PDF?", ("העלאת קובץ מהמחשב", "קישור מ-Google Drive"))
+    # בחירת שיטת ההזנה כולל האופציה החדשה
+    upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
+                             ("העלאת קובץ מהמחשב", 
+                              "קישור מ-Google Drive", 
+                              "שליפה אוטומטית (משכן שילה)"))
     
     uploaded_file = None
     drive_link = ""
     
     if upload_option == "העלאת קובץ מהמחשב":
         uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="main_uploader")
-    else:
+    elif upload_option == "קישור מ-Google Drive":
         drive_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
         st.caption("שים לב: הקישור חייב להיות פתוח להרשאת 'כל מי שברשותו הקישור' (Anyone with the link).")
+    else:
+        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
 
     START_IMG = "start.png"
     END_IMG = "end.png"
@@ -122,6 +168,13 @@ def main():
                         tmp_in.write(uploaded_file.getvalue())
                         input_path = tmp_in.name
                 else:
+                    # שימוש בגוגל דרייב - רגיל או אוטומטי
+                    if upload_option == "שליפה אוטומטית (משכן שילה)":
+                        drive_link = get_latest_mishkan_shilo_drive_link()
+                        if not drive_link:
+                            st.error("שגיאה: לא הצלחנו לאתר את קובץ ה-PDF (קישור דרייב) בעמוד העדכני ביותר.")
+                            return
+                            
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
                         input_path = tmp_in.name
                     gdown.download(url=drive_link, output=input_path, quiet=False, fuzzy=True)
