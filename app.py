@@ -189,20 +189,22 @@ def main():
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     st.title("✂️ חיתוך PDF לפי סימנים")
     
+    # שינוי הסדר כאן כדי ש"שליפה אוטומטית" תהיה ברירת המחדל
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
-                             ("העלאת קובץ מהמחשב", 
-                              "קישור מ-Google Drive", 
-                              "שליפה אוטומטית (משכן שילה)"))
+                             ("שליפה אוטומטית (משכן שילה)", 
+                              "העלאת קובץ מהמחשב", 
+                              "קישור מ-Google Drive"))
     
     uploaded_file = None
     manual_link = ""
     
-    if upload_option == "העלאת קובץ מהמחשב":
+    # התאמת סדר התצוגה של השדות לפי הבחירה
+    if upload_option == "שליפה אוטומטית (משכן שילה)":
+        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
+    elif upload_option == "העלאת קובץ מהמחשב":
         uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="manual_upload")
     elif upload_option == "קישור מ-Google Drive":
         manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
-    else:
-        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
     
     START_IMG, END_IMG = "start.png", "end.png"
 
