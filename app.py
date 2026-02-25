@@ -137,7 +137,7 @@ def prepare_auto_pdf():
     if not downloaded_path:
         return False, "שגיאה בהורדת הקובץ מגוגל דרייב.", None
 
-    # חילוץ השם המדויק מגוגל דרייב (כולל פענוח תווים בעברית)
+    # חילוץ השם המדויק מגוגל דרייב
     original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
 
     if os.path.getsize(downloaded_path) < 100000:
@@ -156,7 +156,6 @@ def prepare_auto_pdf():
     os.remove(downloaded_path)
 
     if success:
-        # עדכון הקונפיג אם מצאנו קובץ חדש *או* אם השם השמור אינו מעודכן (ריפוי עצמי)
         if found_new or last_title != original_filename:
             save_config({
                 "last_post_id": target_post_id,
@@ -217,8 +216,8 @@ def main():
     st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     
-    title_placeholder = st.empty()
-    title_placeholder.title("הורדת סיכום הפרשה הקרובה מגיליון משכן שילה")
+    # --- התיקון: כותרת קבועה לאתר ---
+    st.title('סיכום פרשת שבוע מגיליון "משכן שילה"')
     
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("שליפה אוטומטית (משכן שילה)", 
@@ -239,14 +238,10 @@ def main():
             if not safe_filename.lower().endswith('.pdf'):
                 safe_filename += ".pdf"
             
-            # הצגת השם המלא (ללא .pdf) בכותרת הראשית כפי שביקשת
-            display_title = safe_filename.replace(".pdf", "")
-            title_placeholder.title(display_title)
-            
             with open(AUTO_CUT_PDF, "rb") as f:
-                # התיקון: הכפתור מציג את שם הקובץ המלא, והורדת הקובץ תהיה בשם המקורי בדיוק
+                # התיקון: השם המלא מופיע רק על הכפתור עצמו
                 st.download_button(
-                    label=safe_filename, 
+                    label=f"📥 להורדת: {safe_filename}", 
                     data=f, 
                     file_name=safe_filename, 
                     mime="application/pdf"
@@ -293,7 +288,7 @@ def main():
                             safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
                                 
                             with open(output_path, "rb") as f:
-                                st.download_button(safe_manual_name, f, safe_manual_name, "application/pdf")
+                                st.download_button(f"📥 להורדת: {safe_manual_name}", f, safe_manual_name, "application/pdf")
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                     
@@ -325,7 +320,7 @@ def main():
                             if extract_pdf_by_images(downloaded_path, output_path, start_b64, end_b64):
                                 st.success("החיתוך בוצע בהצלחה!")
                                 with open(output_path, "rb") as f:
-                                    st.download_button(safe_manual_name, f, safe_manual_name, "application/pdf")
+                                    st.download_button(f"📥 להורדת: {safe_manual_name}", f, safe_manual_name, "application/pdf")
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
