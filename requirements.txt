@@ -2,3 +2,4 @@ streamlit
 PyMuPDF
 opencv-python-headless
 numpy
+gdown
