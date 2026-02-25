@@ -14,10 +14,13 @@ import datetime
 import requests 
 from bs4 import BeautifulSoup
 
-# --- פונקציות סריקה מקוונת (סריקה דרך עמוד קטגוריה) ---
-
+# --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
+AUTO_CUT_PDF = "auto_cut_document.pdf"
 
+# --- פונקציות מסד נתונים וזמן ---
+
+@st.cache_data(ttl=600) # שומר בזיכרון ל-10 דקות כדי לא להציף את מסד הנתונים
 def get_config():
     """שולף את הנתונים ממסד הנתונים בענן (JSONBin)"""
     try:
@@ -27,14 +30,12 @@ def get_config():
             req = requests.get(url, headers=headers)
             if req.status_code == 200:
                 return req.json().get('record', {})
-        else:
-            st.write("ℹ️ דיבוג: לא הוגדרו מפתחות מסד נתונים (Secrets), מתחיל מברירת מחדל.")
     except Exception as e:
         st.warning(f"שגיאה בקריאה ממסד הנתונים: {e}")
     return {}
 
 def save_config(data):
-    """שומר את הנתונים למסד הנתונים בענן (JSONBin)"""
+    """שומר את הנתונים למסד הנתונים בענן ומנקה את זיכרון המטמון"""
     try:
         if 'JSONBIN_BIN_ID' in st.secrets and 'JSONBIN_API_KEY' in st.secrets:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
@@ -43,134 +44,161 @@ def save_config(data):
                 'X-Master-Key': st.secrets['JSONBIN_API_KEY']
             }
             requests.put(url, json=data, headers=headers)
-        else:
-            st.warning("⚠️ לא הוגדרו מפתחות למסד הנתונים ב-Secrets. המיקום החדש לא נשמר בענן.")
+            get_config.clear() # עדכון זיכרון המטמון
     except Exception as e:
         st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
 
-def get_latest_mishkan_shilo_drive_link():
-    st.info("🛠️ יומן סריקה: סורק את עמוד הקטגוריה בעזרת BeautifulSoup...")
+def get_next_saturday_1600(from_date):
+    """מחשב מתי תחול השבת הקרובה בשעה 16:00 (אחה"צ)"""
+    days_ahead = 5 - from_date.weekday()
+    # אם היום שבת וכבר אחרי 16:00, השבת הבאה היא בשבוע הבא
+    if days_ahead < 0 or (days_ahead == 0 and from_date.hour >= 16):
+        days_ahead += 7
+    next_sat = from_date + datetime.timedelta(days=days_ahead)
+    return next_sat.replace(hour=16, minute=0, second=0, microsecond=0)
+
+# --- פונקציית האוטומציה המרכזית (מוכנה מראש) ---
+
+def prepare_auto_pdf():
+    """
+    מנהל את כל הלוגיקה האוטומטית: סריקה (אם צריך), הורדה, וחיתוך.
+    מחזיר (True, None) אם הקובץ מוכן, או (False, שגיאה) אם נכשל.
+    """
+    config = get_config()
+    last_post_id = config.get("last_post_id", DEFAULT_START_ID)
+    last_drive_id = config.get("last_drive_id", None)
+    last_check_str = config.get("last_check_time")
+
+    now = datetime.datetime.now()
+    should_scrape = False
+
+    # 1. בדיקת זמנים: האם צריך לסרוק את האתר לחפש גיליון חדש?
+    if not last_check_str:
+        should_scrape = True
+    else:
+        last_check = datetime.datetime.fromisoformat(last_check_str)
+        next_check = get_next_saturday_1600(last_check)
+        if now >= next_check:
+            should_scrape = True
+
+    target_post_id = last_post_id
+    target_drive_id = last_drive_id
+    found_new = False
+
+    # 2. סריקת קטגוריה רק אם באמת הגיע הזמן
+    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     
-    data = get_config()
-    current_id = data.get("last_id", DEFAULT_START_ID)
+    if should_scrape:
+        cat_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
+        cat_res = scraper.get(cat_url)
+        
+        if cat_res.status_code == 200:
+            soup = BeautifulSoup(cat_res.text, "html.parser")
+            post_link = soup.select_one("h3 a, h2 a")
+            
+            if post_link:
+                url = post_link["href"]
+                id_match = re.search(r'kav\.meorot\.net/(\d+)', url)
+                if id_match:
+                    scraped_post_id = int(id_match.group(1))
+                    
+                    # אם מצאנו מספר גיליון חדש יותר ממה ששמור אצלנו!
+                    if scraped_post_id > last_post_id:
+                        post_res = scraper.get(url)
+                        if post_res.status_code == 200:
+                            drive_patterns = [
+                                r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
+                                r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)'
+                            ]
+                            for pattern in drive_patterns:
+                                match = re.search(pattern, post_res.text)
+                                if match:
+                                    target_drive_id = match.group(1)
+                                    target_post_id = scraped_post_id
+                                    found_new = True
+                                    break
 
-    try:
-        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
-        
-        category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        st.write("🔍 נכנס לעמוד הקטגוריה 'משכן שילה'...")
-        
-        cat_response = scraper.get(category_url)
-        if cat_response.status_code != 200:
-            st.error(f"❌ לא הצלחנו לגשת לעמוד הקטגוריה (קוד {cat_response.status_code}).")
-            return None
-            
-        soup = BeautifulSoup(cat_response.text, "html.parser")
-        post_link = soup.select_one("h3 a, h2 a")
-        
-        if not post_link:
-            st.error("❌ לא נמצא לינק ראשון לגליון בעמוד הקטגוריה.")
-            return None
-            
-        target_url = post_link["href"]
-        post_title = post_link.get_text(strip=True)
-        
-        st.write(f"✅ הפוסט האחרון שנמצא: **{post_title}**")
-        
-        highest_id = current_id
-        id_match = re.search(r'kav\.meorot\.net/(\d+)', target_url)
-        if id_match:
-            highest_id = int(id_match.group(1))
-            if highest_id > current_id:
-                st.write(f"🆕 מדובר בגיליון חדש! (הקודם ששמור במערכת היה {current_id})")
-            else:
-                st.write(f"🔄 מושך את הגיליון האחרון המוכר...")
+    # 3. אם לא מצאנו משהו חדש והקובץ כבר חתוך וקיים בשרת - סיימנו בהצלחה מידית!
+    if not found_new and os.path.exists(AUTO_CUT_PDF):
+        return True, None
 
-        st.write(f"🔍 נכנס לתוך הגיליון כדי לשלוף את הקובץ...")
-        response = scraper.get(target_url)
-        
-        if response.status_code == 200:
-            html = response.text
-            
-            drive_patterns = [
-                r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
-                r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)' 
-            ]
-            
-            found_id = None
+    # 4. אם חסר לנו ה-Drive ID (למשל בהרצה הראשונה אי פעם), נשלוף אותו מהפוסט האחרון המוכר
+    if not target_drive_id:
+        post_res = scraper.get(f"https://kav.meorot.net/{target_post_id}/")
+        if post_res.status_code == 200:
+            drive_patterns = [r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)']
             for pattern in drive_patterns:
-                match = re.search(pattern, html)
+                match = re.search(pattern, post_res.text)
                 if match:
-                    found_id = match.group(1)
+                    target_drive_id = match.group(1)
                     break
-            
-            if found_id:
-                st.success(f"✅ נמצא מזהה קובץ (ID): {found_id}")
-                
-                save_config({
-                    "last_id": highest_id,
-                    "found_date": datetime.datetime.now().isoformat()
-                })
-                
-                return found_id
-            else:
-                st.error(f"⚠️ לא נמצא קישור לדרייב בפוסט: {post_title}")
-                return None
-        else:
-            st.error(f"❌ הפוסט לא זמין (סטטוס {response.status_code}).")
-            return None
-            
-    except Exception as e:
-        st.error(f"❌ שגיאה בסריקה: {e}")
-        return None
+                    
+    if not target_drive_id:
+        return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בפוסט."
 
-# --- פונקציות לוגיקה ---
+    # 5. הורדת ה-PDF הגולמי מגוגל
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+        raw_pdf_path = tmp.name
+    gdown.download(id=target_drive_id, output=raw_pdf_path, quiet=False)
+
+    if os.path.getsize(raw_pdf_path) < 100000:
+        return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה."
+
+    # 6. חיתוך הקובץ
+    START_IMG, END_IMG = "start.png", "end.png"
+    if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
+        return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת."
+
+    with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
+    with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
+
+    success = extract_pdf_by_images(raw_pdf_path, AUTO_CUT_PDF, start_b64, end_b64)
+
+    # 7. עדכון מסד הנתונים *רק אם* החיתוך הצליח וזה אכן קובץ חדש
+    if success:
+        if found_new:
+            save_config({
+                "last_post_id": target_post_id,
+                "last_drive_id": target_drive_id,
+                "last_check_time": now.isoformat()
+            })
+        return True, None
+    else:
+        return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש."
+
+# --- פונקציות לוגיקת החיתוך (ללא שינוי) ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
     if page_pixmap.n >= 3:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    
     img_data = base64.b64decode(template_b64)
     np_arr_template = np.frombuffer(img_data, np.uint8)
     template = cv2.imdecode(np_arr_template, cv2.IMREAD_GRAYSCALE)
-
-    if template is None:
-        return False
-
+    if template is None: return False
     for scale in np.linspace(0.4, 1.6, 12):
         width = int(template.shape[1] * scale)
         height = int(template.shape[0] * scale)
-        
-        if height == 0 or width == 0 or height > img_array.shape[0] or width > img_array.shape[1]:
-            continue
-            
+        if height == 0 or width == 0 or height > img_array.shape[0] or width > img_array.shape[1]: continue
         resized_template = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
         result = cv2.matchTemplate(img_array, resized_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(result)
-        
-        if max_val >= threshold:
-            return True
+        if max_val >= threshold: return True
     return False
 
 def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_image_b64):
     doc = fitz.open(input_pdf_path)
     start_page = -1
     end_page = -1
-
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
-
         if start_page == -1:
-            if find_image_in_page(pix, start_image_b64):
-                start_page = page_num
-        
+            if find_image_in_page(pix, start_image_b64): start_page = page_num
         if start_page != -1 and end_page == -1:
             if find_image_in_page(pix, end_image_b64):
                 end_page = page_num
                 break
-
     if start_page != -1 and end_page != -1:
         new_doc = fitz.open()
         new_doc.insert_pdf(doc, from_page=start_page, to_page=end_page)
@@ -178,7 +206,6 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
         new_doc.close()
         doc.close()
         return True
-    
     doc.close()
     return False
 
@@ -189,90 +216,88 @@ def main():
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     st.title("✂️ חיתוך PDF לפי סימנים")
     
-    # שינוי הסדר כאן כדי ש"שליפה אוטומטית" תהיה ברירת המחדל
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("שליפה אוטומטית (משכן שילה)", 
                               "העלאת קובץ מהמחשב", 
                               "קישור מ-Google Drive"))
     
-    uploaded_file = None
-    manual_link = ""
-    
-    # התאמת סדר התצוגה של השדות לפי הבחירה
-    if upload_option == "שליפה אוטומטית (משכן שילה)":
-        st.write("המערכת תיגש לאתר 'המאורות', תחפש את הגיליון העדכני ביותר של 'משכן שילה' ותוריד אותו אוטומטית.")
-    elif upload_option == "העלאת קובץ מהמחשב":
-        uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="manual_upload")
-    elif upload_option == "קישור מ-Google Drive":
-        manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
-    
     START_IMG, END_IMG = "start.png", "end.png"
 
-    if st.button("הפעל חיתוך אוטומטי"):
-        if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-            st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
-            return
+    # טיפול נפרד לחלוטין באופציה האוטומטית (ללא כפתור הפעלה!)
+    if upload_option == "שליפה אוטומטית (משכן שילה)":
+        with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
+            success, error_msg = prepare_auto_pdf()
+        
+        if success and os.path.exists(AUTO_CUT_PDF):
+            st.success("✅ הקובץ החתוך והמעודכן ביותר מוכן עבורך!")
+            with open(AUTO_CUT_PDF, "rb") as f:
+                st.download_button(
+                    label="📥 לחץ כאן להורדת הגיליון", 
+                    data=f, 
+                    file_name="mishkan_shilo_ready.pdf", 
+                    mime="application/pdf"
+                )
+        else:
+            st.error(error_msg)
 
-        with st.spinner("מבצע תהליך שליפה וחיתוך..."):
-            try:
-                with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
-                with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
-
-                input_path = ""
-                
-                if upload_option == "העלאת קובץ מהמחשב":
-                    if not uploaded_file:
-                        st.warning("נא להעלות קובץ.")
-                        return
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(uploaded_file.getvalue())
-                        input_path = tmp.name
-                
-                elif upload_option == "קישור מ-Google Drive":
-                    if not manual_link:
-                        st.warning("נא להזין לינק.")
-                        return
-                    
-                    file_id = None
-                    id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
-                    if id_match:
-                        file_id = id_match.group(1)
-                    else:
-                        st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
-                        return
-                        
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        input_path = tmp.name
-                    gdown.download(id=file_id, output=input_path, quiet=False)
-
-                elif upload_option == "שליפה אוטומטית (משכן שילה)":
-                    file_id = get_latest_mishkan_shilo_drive_link()
-                    if not file_id: 
-                        return
-                    
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        input_path = tmp.name
-                    
-                    gdown.download(id=file_id, output=input_path, quiet=False)
-
-                    file_size = os.path.getsize(input_path)
-                    st.write(f"🔍 דיבוג: גודל הקובץ שהורד מגוגל הוא {file_size / 1024:.2f} KB")
-                    
-                    if file_size < 100000:
-                        st.error("⚠️ הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.")
-                        return
-
-                if input_path:
-                    output_path = input_path.replace(".pdf", "_fixed.pdf")
-                    if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
-                        st.success("החיתוך בוצע בהצלחה!")
-                        with open(output_path, "rb") as f:
-                            st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
-                    else:
-                        st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
+    # טיפול באפשרויות הידניות (דורשות כפתור)
+    else:
+        uploaded_file = None
+        manual_link = ""
+        
+        if upload_option == "העלאת קובץ מהמחשב":
+            uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="manual_upload")
+        elif upload_option == "קישור מ-Google Drive":
+            manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
             
-            except Exception as e:
-                st.error(f"אירעה שגיאה: {e}")
+        if st.button("הפעל חיתוך ידני"):
+            if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
+                st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
+                return
+
+            with st.spinner("מבצע משיכה וחיתוך..."):
+                try:
+                    with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
+                    with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
+
+                    input_path = ""
+                    
+                    if upload_option == "העלאת קובץ מהמחשב":
+                        if not uploaded_file:
+                            st.warning("נא להעלות קובץ.")
+                            return
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            tmp.write(uploaded_file.getvalue())
+                            input_path = tmp.name
+                    
+                    elif upload_option == "קישור מ-Google Drive":
+                        if not manual_link:
+                            st.warning("נא להזין לינק.")
+                            return
+                        
+                        file_id = None
+                        id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
+                        if id_match:
+                            file_id = id_match.group(1)
+                        else:
+                            st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
+                            return
+                            
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                            input_path = tmp.name
+                        gdown.download(id=file_id, output=input_path, quiet=False)
+
+                    if input_path:
+                        output_path = input_path.replace(".pdf", "_fixed.pdf")
+                        if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
+                            st.success("החיתוך בוצע בהצלחה!")
+                            with open(output_path, "rb") as f:
+                                st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
+                        else:
+                            st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
+                
+                except Exception as e:
+                    st.error(f"אירעה שגיאה: {e}")
 
 if __name__ == "__main__":
     main()
