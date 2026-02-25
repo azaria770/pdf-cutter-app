@@ -160,61 +160,77 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
 
 
 # --- ממשק משתמש כאתר אינטרנט (Streamlit) ---
+# --- ממשק משתמש כאתר אינטרנט (Streamlit) ---
 def main():
-    st.set_page_config(page_title="חותך ה-PDF", page_icon="✂️", layout="centered")
-
-    # יישור טקסט לימין (RTL) עבור עברית
+    st.set_page_config(page_title="חותך ה-PDF האוטומטי", page_icon="✂️", layout="centered")
+    
+    # יישור טקסט לימין (RTL)
     st.markdown("""
         <style>
         .block-container { direction: rtl; text-align: right; }
         </style>
     """, unsafe_allow_html=True)
 
-    st.title("✂️ חיתוך PDF לפי תמונות")
-    st.write("העלה את קובץ ה-PDF ואת תמונות ההתחלה והסיום כדי לגזור אוטומטית את טווח העמודים המבוקש.")
+    st.title("✂️ חיתוך PDF אוטומטי")
+    st.write("העלה את קובץ ה-PDF. המערכת תזהה אוטומטית את תמונות ההתחלה והסיום המוגדרות מראש ותגזור את המסמך.")
+    
+    input_pdf_file = st.file_uploader("העלה קובץ PDF לעיבוד", type=["pdf"])
+    
+    # הגדרת נתיבים לתמונות הקבועות (שנמצאות בתיקיית הפרויקט)
+    START_IMG_PATH = "start.png"
+    END_IMG_PATH = "end.png"
 
-    input_pdf_file = st.file_uploader("1. העלה קובץ PDF (מקור)", type=["pdf"])
-    start_image_file = st.file_uploader("2. העלה תמונת התחלה", type=["png", "jpg", "jpeg"])
-    end_image_file = st.file_uploader("3. העלה תמונת סיום", type=["png", "jpg", "jpeg"])
+    if st.button("בצע חיתוך אוטומטי", type="primary"):
+        # בדיקה שהתמונות הקבועות אכן קיימות בשרת
+        if not os.path.exists(START_IMG_PATH) or not os.path.exists(END_IMG_PATH):
+            st.error("שגיאה: קבצי התמונות הקבועים (start.png / end.png) חסרים בשרת.")
+            return
 
-    if st.button("בצע חיתוך", type="primary"):
-        if input_pdf_file and start_image_file and end_image_file:
-            # המרת התמונות שהועלו ל-Base64 (כמו שהפונקציות המקוריות מצפות לקבל)
-            start_b64 = base64.b64encode(start_image_file.getvalue())
-            end_b64 = base64.b64encode(end_image_file.getvalue())
+        if input_pdf_file:
+            with st.spinner("מעבד את המסמך..."):
+                try:
+                    # קריאת התמונות מהדיסק והמרה ל-Base64 עבור הפונקציות הקיימות
+                    with open(START_IMG_PATH, "rb") as f:
+                        start_b64 = base64.b64encode(f.read())
+                    with open(END_IMG_PATH, "rb") as f:
+                        end_b64 = base64.b64encode(f.read())
 
-            # שמירת ה-PDF לקובץ זמני כדי שהפונקציה תוכל לקרוא אותו
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
-                tmp_in.write(input_pdf_file.getvalue())
-                temp_input_path = tmp_in.name
+                    # יצירת קבצים זמניים לעיבוד ה-PDF
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
+                        tmp_in.write(input_pdf_file.getvalue())
+                        temp_input_path = tmp_in.name
+                        
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
+                        temp_output_path = tmp_out.name
 
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_out:
-                temp_output_path = tmp_out.name
-
-            with st.spinner("סורק ומעבד את המסמך... זה עשוי לקחת כמה רגעים."):
-                success = extract_pdf_by_images(temp_input_path, temp_output_path, start_b64, end_b64)
-
-            if success:
-                st.success("הקובץ נחתך בהצלחה!")
-                with open(temp_output_path, "rb") as f:
-                    st.download_button(
-                        label="הורד את ה-PDF החתוך",
-                        data=f,
-                        file_name="extracted_document.pdf",
-                        mime="application/pdf"
-                    )
-            else:
-                st.error("כישלון: לא הצלחנו למצוא את אחת התמונות (או את שתיהן) בתוך המסמך.")
-
-            # ניקוי הקבצים הזמניים
-            try:
-                os.remove(temp_input_path)
-                os.remove(temp_output_path)
-            except Exception:
-                pass
+                    # הפעלת לוגיקת החיתוך
+                    success = extract_pdf_by_images(temp_input_path, temp_output_path, start_b64, end_b64)
+                
+                    if success:
+                        st.success("המסמך זוהה ונחתך בהצלחה!")
+                        with open(temp_output_path, "rb") as f:
+                            st.download_button(
+                                label="📥 הורד את ה-PDF החתוך",
+                                data=f,
+                                file_name="extracted_document.pdf",
+                                mime="application/pdf"
+                            )
+                    else:
+                        st.error("לא הצלחנו למצוא את סימני ההתחלה או הסיום המוגדרים בתוך ה-PDF שהעלית.")
+                
+                except Exception as e:
+                    st.error(f"אירעה שגיאה טכנית: {e}")
+                finally:
+                    # ניקוי שאריות
+                    if 'temp_input_path' in locals(): os.remove(temp_input_path)
+                    if 'temp_output_path' in locals(): os.remove(temp_output_path)
         else:
-            st.warning("נא להעלות את כל שלושת הקבצים (PDF, תמונת התחלה, תמונת סיום) כדי להמשיך.")
+            st.warning("נא להעלות קובץ PDF תחילה.")
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
+
     main()
