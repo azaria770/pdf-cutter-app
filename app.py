@@ -8,7 +8,7 @@ import streamlit as st
 import gdown
 import re
 import cloudscraper
-import json  # הספרייה שהוספנו לטיפול בקובץ הקונפיג
+import json
 
 # --- פונקציות סריקה מקוונת (סריקה רציפה עם קובץ קונפיג) ---
 
@@ -38,10 +38,11 @@ def get_latest_mishkan_shilo_drive_link():
     try:
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         
-        # מגבלה: נסרוק רק עד 20 מספרים קדימה כדי למנוע לולאה אינסופית במקרה שאין עדיין עלון
+        # מגבלה: נסרוק רק עד 20 מספרים קדימה כדי למנוע לולאה אינסופית
         max_attempts = 20 
         
-        for i in range(1, max_attempts + 1):
+        # התיקון: מתחילים מ-0 כדי לבדוק קודם כל את המספר הנוכחי לפני שמתקדמים
+        for i in range(0, max_attempts):
             test_id = current_id + i
             test_url = f"https://kav.meorot.net/{test_id}/?force_isolation=true"
             st.write(f"2. סורק את מספר {test_id}...")
