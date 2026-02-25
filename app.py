@@ -12,8 +12,9 @@ import json
 import urllib.parse
 import datetime
 import requests 
+from bs4 import BeautifulSoup # הספרייה החדשה שהוספנו לחילוץ האלמנטים
 
-# --- פונקציות סריקה מקוונת (סריקה דרך עמוד קטגוריה) ---
+# --- פונקציות סריקה מקוונת (מבוסס BeautifulSoup) ---
 
 DEFAULT_START_ID = 72680
 
@@ -48,47 +49,50 @@ def save_config(data):
         st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
 
 def get_latest_mishkan_shilo_drive_link():
-    st.info("🛠️ יומן סריקה: סורק את עמוד הקטגוריה הראשי למציאת הגיליון העדכני...")
+    st.info("🛠️ יומן סריקה: סורק את עמוד הקטגוריה בעזרת BeautifulSoup...")
     
-    # קריאת הנתונים השמורים (אופציונלי, כדי לדעת מה היה הגיליון הקודם)
     data = get_config()
     current_id = data.get("last_id", DEFAULT_START_ID)
 
     try:
+        # אנו משתמשים ב-cloudscraper כדי לא להיחסם (שגיאת 403)
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         
-        # שלב 1: כניסה לעמוד הקטגוריה הייעודי למשכן שילה
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        st.write("🔍 מושך נתונים מעמוד הקטגוריה 'משכן שילה'...")
+        st.write("🔍 נכנס לעמוד הקטגוריה 'משכן שילה'...")
         
         cat_response = scraper.get(category_url)
         if cat_response.status_code != 200:
             st.error(f"❌ לא הצלחנו לגשת לעמוד הקטגוריה (קוד {cat_response.status_code}).")
             return None
             
-        # חיפוש כל המספרים בלינקים שמובילים לפוסטים בעמוד זה
-        post_ids = re.findall(r'kav\.meorot\.net/(\d+)/?', cat_response.text)
+        # שימוש ב-BeautifulSoup לחילוץ הפוסט הראשון כפי שהצעת
+        soup = BeautifulSoup(cat_response.text, "html.parser")
+        post_link = soup.select_one("h3 a, h2 a")
         
-        if not post_ids:
-            st.error("❌ לא מצאנו שום גיליון בעמוד הקטגוריה.")
+        if not post_link:
+            st.error("❌ לא נמצא לינק ראשון לגליון בעמוד הקטגוריה.")
             return None
             
-        # הפיכה למספרים ובחירת המספר הגבוה ביותר (המעודכן ביותר)
-        valid_ids = [int(pid) for pid in post_ids]
-        highest_id = max(valid_ids)
+        target_url = post_link["href"]
+        post_title = post_link.get_text(strip=True)
         
-        st.write(f"✅ המספר הגבוה ביותר שנמצא בקטגוריה הוא: {highest_id}")
+        st.write(f"✅ הפוסט האחרון שנמצא: **{post_title}**")
         
-        if highest_id > current_id:
-            st.write(f"🆕 נמצא גיליון חדש! (הקודם ששמור במערכת היה {current_id})")
-        else:
-            st.write(f"🔄 מושך את הגיליון האחרון המוכר ({highest_id}).")
+        # נחלץ את ה-ID מתוך הלינק רק כדי שנוכל לעדכן את מסד הנתונים למעקב
+        highest_id = current_id
+        id_match = re.search(r'kav\.meorot\.net/(\d+)', target_url)
+        if id_match:
+            highest_id = int(id_match.group(1))
+            if highest_id > current_id:
+                st.write(f"🆕 מדובר בגיליון חדש! (הקודם ששמור במערכת היה {current_id})")
+            else:
+                st.write(f"🔄 מושך את הגיליון האחרון המוכר...")
 
-        # שלב 2: כניסה לפוסט הספציפי שנבחר ושליפת הדרייב
-        target_url = f"https://kav.meorot.net/{highest_id}/"
-        st.write(f"🔍 נכנס לדף הגיליון...")
-        
+        # שלב 2: כניסה לפוסט הספציפי ושליפת הדרייב
+        st.write(f"🔍 נכנס לתוך הגיליון כדי לשלוף את הקובץ...")
         response = scraper.get(target_url)
+        
         if response.status_code == 200:
             html = response.text
             
@@ -105,9 +109,9 @@ def get_latest_mishkan_shilo_drive_link():
                     break
             
             if found_id:
-                st.success(f"✅ נמצא מזהה קובץ (ID) במספר {highest_id}: {found_id}")
+                st.success(f"✅ נמצא מזהה קובץ (ID): {found_id}")
                 
-                # שמירת ה-ID החדש במסד הנתונים
+                # שמירת ה-ID במסד הנתונים
                 save_config({
                     "last_id": highest_id,
                     "found_date": datetime.datetime.now().isoformat()
@@ -115,10 +119,10 @@ def get_latest_mishkan_shilo_drive_link():
                 
                 return found_id
             else:
-                st.error(f"⚠️ לא נמצא קישור לדרייב בדף {highest_id}.")
+                st.error(f"⚠️ לא נמצא קישור לדרייב בפוסט: {post_title}")
                 return None
         else:
-            st.error(f"❌ דף {highest_id} לא זמין (סטטוס {response.status_code}).")
+            st.error(f"❌ הפוסט לא זמין (סטטוס {response.status_code}).")
             return None
             
     except Exception as e:
@@ -208,70 +212,4 @@ def main():
     START_IMG, END_IMG = "start.png", "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
-        if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-            st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
-            return
-
-        with st.spinner("מבצע תהליך שליפה וחיתוך..."):
-            try:
-                with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
-                with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
-
-                input_path = ""
-                
-                if upload_option == "העלאת קובץ מהמחשב":
-                    if not uploaded_file:
-                        st.warning("נא להעלות קובץ.")
-                        return
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        tmp.write(uploaded_file.getvalue())
-                        input_path = tmp.name
-                
-                elif upload_option == "קישור מ-Google Drive":
-                    if not manual_link:
-                        st.warning("נא להזין לינק.")
-                        return
-                    
-                    file_id = None
-                    id_match = re.search(r'/d/([a-zA-Z0-9_-]+)', manual_link)
-                    if id_match:
-                        file_id = id_match.group(1)
-                    else:
-                        st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
-                        return
-                        
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        input_path = tmp.name
-                    gdown.download(id=file_id, output=input_path, quiet=False)
-
-                elif upload_option == "שליפה אוטומטית (משכן שילה)":
-                    file_id = get_latest_mishkan_shilo_drive_link()
-                    if not file_id: 
-                        return
-                    
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                        input_path = tmp.name
-                    
-                    gdown.download(id=file_id, output=input_path, quiet=False)
-
-                    file_size = os.path.getsize(input_path)
-                    st.write(f"🔍 דיבוג: גודל הקובץ שהורד מגוגל הוא {file_size / 1024:.2f} KB")
-                    
-                    if file_size < 100000:
-                        st.error("⚠️ הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.")
-                        return
-
-                if input_path:
-                    output_path = input_path.replace(".pdf", "_fixed.pdf")
-                    if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
-                        st.success("החיתוך בוצע בהצלחה!")
-                        with open(output_path, "rb") as f:
-                            st.download_button("📥 הורד קובץ חתוך", f, "cut_document.pdf", "application/pdf")
-                    else:
-                        st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
-            
-            except Exception as e:
-                st.error(f"אירעה שגיאה: {e}")
-
-if __name__ == "__main__":
-    main()
+        if not os
