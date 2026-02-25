@@ -6,37 +6,30 @@ import base64
 import tempfile
 import streamlit as st
 import gdown
-import urllib.request
 import re
+import cloudscraper # הספרייה החדשה שעוקפת חסימות
 
-# --- פונקציות סריקה מקוונת (משופר עם עקיפת חסימת 403) ---
+# --- פונקציות סריקה מקוונת (משופר עם עוקף חומות אש) ---
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק את אתר המאורות תוך הצגת שלבי הסריקה למשתמש (Debug)
-    ומשתמש בתחפושת דפדפן מלאה כדי לעקוף חסימות רובוטים.
+    סורק את אתר המאורות באמצעות CloudScraper כדי לעקוף את שגיאת 403.
     """
-    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני...")
+    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני (עוקף חומת אש)...")
     try:
+        # יצירת סורק חכם שעוקף הגנות של Cloudflare/WAF
+        scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
+        
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
         
-        # התחפושת החדשה: מדמה דפדפן אמיתי במאת האחוזים כדי למנוע שגיאת 403
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-            'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-            'Sec-Fetch-User': '?1'
-        }
+        st.write("1. מושך נתונים מעמוד הקטגוריה הראשי...")
+        response = scraper.get(category_url)
         
-        st.write("1. מתחזה לדפדפן ומושך נתונים מעמוד הקטגוריה הראשי...")
-        req = urllib.request.Request(category_url, headers=headers)
-        with urllib.request.urlopen(req) as response:
-            html = response.read().decode('utf-8')
+        if response.status_code != 200:
+            st.error(f"❌ דיבוג: חומת האש עדיין חוסמת (שגיאה {response.status_code}).")
+            return None
+            
+        html = response.text
         
         post_ids = re.findall(r'kav\.meorot\.net/(\d+)', html)
         if not post_ids:
@@ -50,9 +43,8 @@ def get_latest_mishkan_shilo_drive_link():
         latest_post_url = f"https://kav.meorot.net/{latest_id}/"
         st.write(f"3. המספר הגבוה ביותר שנבחר הוא {latest_id}. נכנס לעמוד הפוסט...")
         
-        req2 = urllib.request.Request(latest_post_url, headers=headers)
-        with urllib.request.urlopen(req2) as response2:
-            html2 = response2.read().decode('utf-8')
+        response2 = scraper.get(latest_post_url)
+        html2 = response2.text
             
         drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html2)
         if drive_match:
@@ -60,7 +52,7 @@ def get_latest_mishkan_shilo_drive_link():
             st.success(f"4. ✅ נמצא קישור גוגל דרייב: {found_link}")
             return found_link
         else:
-            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה (ללא חסימה!), אבל לא נמצא בתוכו קישור לגוגל דרייב.")
+            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה, אבל לא נמצא בתוכו קישור לגוגל דרייב.")
             with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט"):
                 st.text(html2)
             return None
