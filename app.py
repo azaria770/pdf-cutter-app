@@ -8,61 +8,68 @@ import streamlit as st
 import gdown
 import re
 import cloudscraper
+import json  # הספרייה שהוספנו לטיפול בקובץ הקונפיג
 
-# --- פונקציות סריקה מקוונת (משופר עם סינון מזהים ובידוד עמוד) ---
+# --- פונקציות סריקה מקוונת (סריקה רציפה עם קובץ קונפיג) ---
+
+CONFIG_FILE = "config.json"
+DEFAULT_START_ID = 72680
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק את האתר, מוצא פוסט מ-72680 ומעלה, 
-    ונכנס לגרסה המבודדת שלו (?force_isolation=true) לשליפת הדרייב.
+    סורק באופן רציף החל מהמספר האחרון ששמור בקונפיג ועד שהוא מוצא PDF.
     """
-    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני...")
+    st.info("🛠️ יומן סריקה: מתחיל סריקה רציפה של פוסטים...")
+    
+    current_id = DEFAULT_START_ID
+    
+    # 1. קריאת המספר האחרון מתוך קובץ הקונפיג
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                data = json.load(f)
+                current_id = data.get("last_id", DEFAULT_START_ID)
+                st.write(f"1. 📥 נטען מספר התחלתי מקובץ ההגדרות: {current_id}")
+        except Exception as e:
+            st.warning("⚠️ שגיאה בקריאת קובץ ההגדרות, מתחיל מבררת המחדל.")
+    else:
+        st.write(f"1. 📄 קובץ הגדרות לא קיים במערכת, מתחיל מבררת המחדל ({DEFAULT_START_ID}).")
+
     try:
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         
-        category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
+        # מגבלה: נסרוק רק עד 20 מספרים קדימה כדי למנוע לולאה אינסופית במקרה שאין עדיין עלון
+        max_attempts = 20 
         
-        st.write("1. מושך נתונים מעמוד הקטגוריה הראשי...")
-        response = scraper.get(category_url)
-        
-        if response.status_code != 200:
-            st.error(f"❌ דיבוג: חסימת רשת (שגיאה {response.status_code}).")
-            return None
+        for i in range(1, max_attempts + 1):
+            test_id = current_id + i
+            test_url = f"https://kav.meorot.net/{test_id}/?force_isolation=true"
+            st.write(f"2. סורק את מספר {test_id}...")
             
-        html = response.text
-        
-        post_ids = re.findall(r'kav\.meorot\.net/(\d+)', html)
-        if not post_ids:
-            st.error("❌ דיבוג: העמוד נטען אך לא נמצאו בו מספרים. ייתכן שכתובת האתר השתנתה.")
-            return None
-            
-        # סינון: רק מספרים שהם 72680 ומעלה
-        valid_ids = [int(pid) for pid in post_ids if int(pid) >= 72680]
-        
-        if not valid_ids:
-            st.error("❌ דיבוג: לא נמצאו מספרים רלוונטיים (מ-72680 ומעלה).")
-            return None
-            
-        latest_id = max(valid_ids)
-        
-        # הרכבת הקישור המבודד כפי שביקשת
-        latest_post_url = f"https://kav.meorot.net/{latest_id}/?force_isolation=true"
-        st.write(f"2. המספר הגבוה ביותר שנמצא הוא {latest_id}.")
-        st.write(f"3. נכנס לעמוד המבודד: {latest_post_url} ...")
-        
-        response2 = scraper.get(latest_post_url)
-        html2 = response2.text
-            
-        drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html2)
-        if drive_match:
-            found_link = drive_match.group(1)
-            st.success(f"4. ✅ נמצא קישור גוגל דרייב: {found_link}")
-            return found_link
-        else:
-            st.error("4. ❌ דיבוג: הפוסט המבודד נטען בהצלחה, אבל לא נמצא בתוכו קישור לגוגל דרייב.")
-            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט המבודד"):
-                st.text(html2)
-            return None
+            response = scraper.get(test_url)
+            if response.status_code == 200:
+                html = response.text
+                # מחפש לינק גוגל דרייב בתוך הקוד
+                drive_match = re.search(r'(https://drive\.google\.com/file[^\'"]+)', html)
+                
+                if drive_match:
+                    found_link = drive_match.group(1)
+                    st.success(f"3. ✅ נמצא קובץ PDF במספר {test_id}!")
+                    
+                    # עדכון קובץ הקונפיג עם המספר החדש שמצאנו
+                    with open(CONFIG_FILE, "w") as f:
+                        json.dump({"last_id": test_id}, f)
+                    st.write(f"4. 💾 המספר {test_id} נשמר בקובץ ההגדרות לסריקה הבאה.")
+                    
+                    return found_link
+                else:
+                    st.write(f"   ❌ אין PDF במספר {test_id}, ממשיך הלאה...")
+            else:
+                st.write(f"   ❌ חסימה או שגיאה במספר {test_id} (קוד {response.status_code}).")
+                
+        st.error(f"❌ סרקנו {max_attempts} מספרים קדימה ולא נמצא PDF חדש. ייתכן שעוד לא פורסם.")
+        return None
+
     except Exception as e:
         st.error(f"❌ שגיאת מערכת במהלך הסריקה: {e}")
         return None
