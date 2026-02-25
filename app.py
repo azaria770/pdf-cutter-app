@@ -105,6 +105,10 @@ def prepare_auto_pdf():
                     if scraped_post_id > last_post_id:
                         post_res = scraper.get(url)
                         if post_res.status_code == 200:
+                            post_soup = BeautifulSoup(post_res.text, "html.parser")
+                            h1_tag = post_soup.select_one("h1")
+                            full_title = h1_tag.get_text(strip=True) if h1_tag else post_link.get_text(strip=True)
+                            
                             drive_patterns = [
                                 r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
                                 r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)'
@@ -114,6 +118,7 @@ def prepare_auto_pdf():
                                 if match:
                                     target_drive_id = match.group(1)
                                     target_post_id = scraped_post_id
+                                    target_title = full_title
                                     found_new = True
                                     break
 
@@ -134,7 +139,6 @@ def prepare_auto_pdf():
     if not target_drive_id:
         return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בפוסט.", None
 
-    # --- התיקון: הורדת הקובץ ושאיבת השם המקורי מגוגל דרייב ---
     downloaded_path = gdown.download(id=target_drive_id, quiet=False)
     
     if not downloaded_path:
@@ -156,7 +160,7 @@ def prepare_auto_pdf():
 
     # חיתוך הקובץ מתוך הקובץ המקורי שירד
     success = extract_pdf_by_images(downloaded_path, AUTO_CUT_PDF, start_b64, end_b64)
-    os.remove(downloaded_path) # ניקוי הקובץ המקורי (הגולמי) מהשרת
+    os.remove(downloaded_path) # ניקוי הקובץ המקורי
 
     if success:
         if found_new:
@@ -164,7 +168,7 @@ def prepare_auto_pdf():
                 "last_post_id": target_post_id,
                 "last_drive_id": target_drive_id,
                 "last_check_time": now.isoformat(),
-                "last_title": original_filename # שומרים בדיוק את שם הקובץ כפי שהגיע מגוגל
+                "last_title": original_filename
             })
         return True, None, original_filename
     else:
@@ -219,7 +223,6 @@ def main():
     st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     
-    # אזור ייעודי לכותרת שתתעדכן דינמית
     title_placeholder = st.empty()
     title_placeholder.title("הורדת סיכום הפרשה הקרובה מגיליון משכן שילה")
     
@@ -237,15 +240,20 @@ def main():
         if success and os.path.exists(AUTO_CUT_PDF):
             st.success("✅ הקובץ מוכן עבורך!")
             
-            # עדכון כותרת האתר לשם הקובץ המלא והמדויק
-            title_placeholder.title(f"הורדת סיכום הפרשה הקרובה: {target_title}")
+            # הצגת השם בכותרת (ללא סיומת ה-.pdf כדי שייראה אסתטי)
+            display_title = target_title.replace(".pdf", "")
+            title_placeholder.title(f"הורדת סיכום הפרשה הקרובה: {display_title}")
+            
+            # --- התיקון הקריטי: אכיפת סיומת .pdf וניקוי תווים חוקי ---
+            safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip()
+            if not safe_filename.lower().endswith('.pdf'):
+                safe_filename += ".pdf"
             
             with open(AUTO_CUT_PDF, "rb") as f:
-                # הכפתור יציג את שם הקובץ המלא כולל הסיומת, וכך גם ישמור אותו במחשב
                 st.download_button(
-                    label=f"📥 הורד את הקובץ: {target_title}", 
+                    label=f"📥 הורד את הקובץ: {safe_filename}", 
                     data=f, 
-                    file_name=target_title, 
+                    file_name=safe_filename, 
                     mime="application/pdf"
                 )
         else:
@@ -283,7 +291,12 @@ def main():
                         output_path = input_path.replace(".pdf", "_fixed.pdf")
                         if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
                             st.success("החיתוך בוצע בהצלחה!")
-                            safe_manual_name = uploaded_file.name.replace(".pdf", "_fixed.pdf")
+                            
+                            safe_manual_name = uploaded_file.name
+                            if not safe_manual_name.lower().endswith('.pdf'):
+                                safe_manual_name += ".pdf"
+                            safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
+                                
                             with open(output_path, "rb") as f:
                                 st.download_button("📥 הורד קובץ חתוך", f, safe_manual_name, "application/pdf")
                         else:
@@ -302,16 +315,23 @@ def main():
                             st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
                             return
                             
-                        # עדכון הלוגיקה גם בקישור ידני למשיכת השם המקורי מגוגל
                         downloaded_path = gdown.download(id=file_id, quiet=False)
                         if downloaded_path:
                             original_filename = os.path.basename(downloaded_path)
-                            output_path = original_filename.replace(".pdf", "_fixed.pdf")
+                            
+                            # הבטחת סיומת חוקית גם בהורדה ידנית מקישור
+                            safe_manual_name = re.sub(r'[\\/*?:"<>|]', "", original_filename).strip()
+                            if safe_manual_name.lower().endswith('.pdf'):
+                                safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
+                            else:
+                                safe_manual_name += "_fixed.pdf"
+                                
+                            output_path = "temp_fixed.pdf"
                             
                             if extract_pdf_by_images(downloaded_path, output_path, start_b64, end_b64):
                                 st.success("החיתוך בוצע בהצלחה!")
                                 with open(output_path, "rb") as f:
-                                    st.download_button(f"📥 הורד את {original_filename}", f, original_filename, "application/pdf")
+                                    st.download_button(f"📥 הורד את {safe_manual_name}", f, safe_manual_name, "application/pdf")
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
