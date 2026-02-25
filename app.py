@@ -5,19 +5,15 @@ import os
 import base64
 import tempfile
 import streamlit as st
+import gdown  # הספרייה החדשה לטיפול בקישורי גוגל דרייב
 
-# --- פונקציות עיבוד וזיהוי ---
+# --- פונקציות לוגיקה מקוריות (ללא שינוי) ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
-    """
-    סורק עמוד PDF ומחפש תמונת מטרה תוך שימוש באופטימיזציית Scale למהירות מקסימלית.
-    """
-    # המרת עמוד ה-PDF למערך NumPy (גווני אפור)
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
     if page_pixmap.n >= 3:
         img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
     
-    # טעינת תמונת המטרה מ-Base64
     img_data = base64.b64decode(template_b64)
     np_arr_template = np.frombuffer(img_data, np.uint8)
     template = cv2.imdecode(np_arr_template, cv2.IMREAD_GRAYSCALE)
@@ -25,7 +21,6 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     if template is None:
         return False
 
-    # אופטימיזציה: 12 קפיצות גודל בלבד למהירות (במקום 28)
     for scale in np.linspace(0.4, 1.6, 12):
         width = int(template.shape[1] * scale)
         height = int(template.shape[0] * scale)
@@ -42,24 +37,18 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     return False
 
 def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_image_b64):
-    """
-    סורק את המסמך וגוזר את טווח העמודים.
-    """
     doc = fitz.open(input_pdf_path)
     start_page = -1
     end_page = -1
 
-    # מעבר על עמודי המסמך
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        # רנדור העמוד לתמונה ברזולוציה טובה לזיהוי
         pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
 
         if start_page == -1:
             if find_image_in_page(pix, start_image_b64):
                 start_page = page_num
         
-        # אם מצאנו התחלה, נחפש סוף (מאותו עמוד והלאה)
         if start_page != -1 and end_page == -1:
             if find_image_in_page(pix, end_image_b64):
                 end_page = page_num
@@ -81,7 +70,6 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
 def main():
     st.set_page_config(page_title="חותך PDF אוטומטי", page_icon="✂️")
     
-    # עיצוב RTL לעברית
     st.markdown("""
         <style>
         .block-container { direction: rtl; text-align: right; }
@@ -92,35 +80,59 @@ def main():
     st.title("✂️ חיתוך PDF לפי סימנים")
     st.info("המערכת סורקת את ה-PDF ומחפשת את תמונות ההתחלה והסיום המוגדרות מראש.")
 
-    # רכיב העלאת קבצים
-    uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="main_uploader")
+    # בחירת שיטת ההזנה
+    upload_option = st.radio("איך תרצה לטעון את ה-PDF?", ("העלאת קובץ מהמחשב", "קישור מ-Google Drive"))
     
-    # נתיבים לתמונות הקבועות ב-GitHub
+    uploaded_file = None
+    drive_link = ""
+    
+    if upload_option == "העלאת קובץ מהמחשב":
+        uploaded_file = st.file_uploader("בחר קובץ PDF מהמחשב", type=["pdf"], key="main_uploader")
+    else:
+        drive_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
+        st.caption("שים לב: הקישור חייב להיות פתוח להרשאת 'כל מי שברשותו הקישור' (Anyone with the link).")
+
     START_IMG = "start.png"
     END_IMG = "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
-        if not uploaded_file:
+        # בדיקות תקינות קלט
+        if upload_option == "העלאת קובץ מהמחשב" and not uploaded_file:
             st.warning("נא להעלות קובץ PDF קודם.")
+            return
+        if upload_option == "קישור מ-Google Drive" and not drive_link:
+            st.warning("נא להדביק קישור חוקי מגוגל דרייב קודם.")
             return
             
         if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
             st.error("שגיאה: קבצי התמונות (start.png / end.png) לא נמצאו בשרת. וודא שהם הועלו ל-GitHub.")
             return
 
-        with st.spinner("סורק את המסמך... זה עשוי לקחת מספר שניות"):
+        with st.spinner("מושך את הקובץ וסורק את המסמך... זה עשוי לקחת מספר שניות"):
             try:
-                # טעינת התמונות
                 with open(START_IMG, "rb") as f:
                     start_b64 = base64.b64encode(f.read())
                 with open(END_IMG, "rb") as f:
                     end_b64 = base64.b64encode(f.read())
 
-                # שמירה זמנית של הקובץ שהועלה
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
-                    tmp_in.write(uploaded_file.getvalue())
-                    input_path = tmp_in.name
+                input_path = ""
                 
+                # טיפול בקובץ לפי בחירת המשתמש
+                if upload_option == "העלאת קובץ מהמחשב":
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
+                        tmp_in.write(uploaded_file.getvalue())
+                        input_path = tmp_in.name
+                else:
+                    # שימוש ב-gdown להורדה מהדרייב. הפרמטר fuzzy=True עוזר לזהות מגוון סוגי קישורים
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
+                        input_path = tmp_in.name
+                    gdown.download(url=drive_link, output=input_path, quiet=False, fuzzy=True)
+                    
+                    # בדיקה אם ההורדה מהדרייב הצליחה
+                    if not os.path.exists(input_path) or os.path.getsize(input_path) < 1000:
+                        st.error("שגיאה בהורדת הקובץ מדרייב. וודא שהקישור פומבי ושזהו באמת קובץ PDF.")
+                        return
+
                 output_path = input_path.replace(".pdf", "_fixed.pdf")
 
                 # ביצוע החיתוך
