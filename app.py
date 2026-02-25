@@ -20,7 +20,7 @@ AUTO_CUT_PDF = "auto_cut_document.pdf"
 
 # --- פונקציות מסד נתונים וזמן ---
 
-@st.cache_data(ttl=600) # שומר בזיכרון ל-10 דקות כדי לא להציף את מסד הנתונים
+@st.cache_data(ttl=600) 
 def get_config():
     """שולף את הנתונים ממסד הנתונים בענן (JSONBin)"""
     try:
@@ -44,35 +44,34 @@ def save_config(data):
                 'X-Master-Key': st.secrets['JSONBIN_API_KEY']
             }
             requests.put(url, json=data, headers=headers)
-            get_config.clear() # עדכון זיכרון המטמון
+            get_config.clear() 
     except Exception as e:
         st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
 
 def get_next_saturday_1600(from_date):
-    """מחשב מתי תחול השבת הקרובה בשעה 16:00 (אחה"צ)"""
+    """מחשב מתי תחול השבת הקרובה בשעה 16:00"""
     days_ahead = 5 - from_date.weekday()
-    # אם היום שבת וכבר אחרי 16:00, השבת הבאה היא בשבוע הבא
     if days_ahead < 0 or (days_ahead == 0 and from_date.hour >= 16):
         days_ahead += 7
     next_sat = from_date + datetime.timedelta(days=days_ahead)
     return next_sat.replace(hour=16, minute=0, second=0, microsecond=0)
 
-# --- פונקציית האוטומציה המרכזית (מוכנה מראש) ---
+# --- פונקציית האוטומציה המרכזית ---
 
 def prepare_auto_pdf():
     """
-    מנהל את כל הלוגיקה האוטומטית: סריקה (אם צריך), הורדה, וחיתוך.
-    מחזיר (True, None) אם הקובץ מוכן, או (False, שגיאה) אם נכשל.
+    מנהל את הלוגיקה האוטומטית.
+    מחזיר: (הצלחה?, הודעת_שגיאה, שם_הקובץ)
     """
     config = get_config()
     last_post_id = config.get("last_post_id", DEFAULT_START_ID)
     last_drive_id = config.get("last_drive_id", None)
     last_check_str = config.get("last_check_time")
+    last_title = config.get("last_title", "mishkan_shilo_ready") # טעינת השם השמור
 
     now = datetime.datetime.now()
     should_scrape = False
 
-    # 1. בדיקת זמנים: האם צריך לסרוק את האתר לחפש גיליון חדש?
     if not last_check_str:
         should_scrape = True
     else:
@@ -83,9 +82,9 @@ def prepare_auto_pdf():
 
     target_post_id = last_post_id
     target_drive_id = last_drive_id
+    target_title = last_title
     found_new = False
 
-    # 2. סריקת קטגוריה רק אם באמת הגיע הזמן
     scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
     
     if should_scrape:
@@ -98,11 +97,12 @@ def prepare_auto_pdf():
             
             if post_link:
                 url = post_link["href"]
+                scraped_title = post_link.get_text(strip=True) # חילוץ שם הגיליון!
+                
                 id_match = re.search(r'kav\.meorot\.net/(\d+)', url)
                 if id_match:
                     scraped_post_id = int(id_match.group(1))
                     
-                    # אם מצאנו מספר גיליון חדש יותר ממה ששמור אצלנו!
                     if scraped_post_id > last_post_id:
                         post_res = scraper.get(url)
                         if post_res.status_code == 200:
@@ -115,14 +115,14 @@ def prepare_auto_pdf():
                                 if match:
                                     target_drive_id = match.group(1)
                                     target_post_id = scraped_post_id
+                                    target_title = scraped_title # שמירת השם החדש
                                     found_new = True
                                     break
 
-    # 3. אם לא מצאנו משהו חדש והקובץ כבר חתוך וקיים בשרת - סיימנו בהצלחה מידית!
+    # אם הקובץ קיים ואין חדש - מחזירים אותו יחד עם השם שלו
     if not found_new and os.path.exists(AUTO_CUT_PDF):
-        return True, None
+        return True, None, target_title
 
-    # 4. אם חסר לנו ה-Drive ID (למשל בהרצה הראשונה אי פעם), נשלוף אותו מהפוסט האחרון המוכר
     if not target_drive_id:
         post_res = scraper.get(f"https://kav.meorot.net/{target_post_id}/")
         if post_res.status_code == 200:
@@ -134,39 +134,37 @@ def prepare_auto_pdf():
                     break
                     
     if not target_drive_id:
-        return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בפוסט."
+        return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בפוסט.", None
 
-    # 5. הורדת ה-PDF הגולמי מגוגל
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
         raw_pdf_path = tmp.name
     gdown.download(id=target_drive_id, output=raw_pdf_path, quiet=False)
 
     if os.path.getsize(raw_pdf_path) < 100000:
-        return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה."
+        return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.", None
 
-    # 6. חיתוך הקובץ
     START_IMG, END_IMG = "start.png", "end.png"
     if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-        return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת."
+        return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת.", None
 
     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
 
     success = extract_pdf_by_images(raw_pdf_path, AUTO_CUT_PDF, start_b64, end_b64)
 
-    # 7. עדכון מסד הנתונים *רק אם* החיתוך הצליח וזה אכן קובץ חדש
     if success:
         if found_new:
             save_config({
                 "last_post_id": target_post_id,
                 "last_drive_id": target_drive_id,
-                "last_check_time": now.isoformat()
+                "last_check_time": now.isoformat(),
+                "last_title": target_title # שמירת שם הגיליון בענן
             })
-        return True, None
+        return True, None, target_title
     else:
-        return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש."
+        return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש.", None
 
-# --- פונקציות לוגיקת החיתוך (ללא שינוי) ---
+# --- פונקציות לוגיקת החיתוך ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -223,24 +221,26 @@ def main():
     
     START_IMG, END_IMG = "start.png", "end.png"
 
-    # טיפול נפרד לחלוטין באופציה האוטומטית (ללא כפתור הפעלה!)
     if upload_option == "שליפה אוטומטית (משכן שילה)":
         with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
-            success, error_msg = prepare_auto_pdf()
+            success, error_msg, target_title = prepare_auto_pdf()
         
         if success and os.path.exists(AUTO_CUT_PDF):
-            st.success("✅ הקובץ החתוך והמעודכן ביותר מוכן עבורך!")
+            st.success(f"✅ הקובץ '{target_title}' מוכן עבורך!")
+            
+            # ניקוי שם הקובץ מתווים שאסורים לשמירה בווינדוס/מאק
+            safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title) + ".pdf"
+            
             with open(AUTO_CUT_PDF, "rb") as f:
                 st.download_button(
                     label="📥 לחץ כאן להורדת הגיליון", 
                     data=f, 
-                    file_name="mishkan_shilo_ready.pdf", 
+                    file_name=safe_filename, 
                     mime="application/pdf"
                 )
         else:
             st.error(error_msg)
 
-    # טיפול באפשרויות הידניות (דורשות כפתור)
     else:
         uploaded_file = None
         manual_link = ""
