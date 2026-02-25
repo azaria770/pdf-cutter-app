@@ -5,9 +5,9 @@ import os
 import base64
 import tempfile
 import streamlit as st
-import gdown  # הספרייה החדשה לטיפול בקישורי גוגל דרייב
+import gdown
 
-# --- פונקציות לוגיקה מקוריות (ללא שינוי) ---
+# --- פונקציות לוגיקה ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -43,7 +43,8 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0))
+        # נשאר: קיצור זמן הסריקה על ידי הקטנת מטריצת הרינדור מ-2.0 ל-1.2
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
 
         if start_page == -1:
             if find_image_in_page(pix, start_image_b64):
@@ -96,7 +97,6 @@ def main():
     END_IMG = "end.png"
 
     if st.button("הפעל חיתוך אוטומטי"):
-        # בדיקות תקינות קלט
         if upload_option == "העלאת קובץ מהמחשב" and not uploaded_file:
             st.warning("נא להעלות קובץ PDF קודם.")
             return
@@ -117,27 +117,24 @@ def main():
 
                 input_path = ""
                 
-                # טיפול בקובץ לפי בחירת המשתמש
                 if upload_option == "העלאת קובץ מהמחשב":
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
                         tmp_in.write(uploaded_file.getvalue())
                         input_path = tmp_in.name
                 else:
-                    # שימוש ב-gdown להורדה מהדרייב. הפרמטר fuzzy=True עוזר לזהות מגוון סוגי קישורים
                     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_in:
                         input_path = tmp_in.name
                     gdown.download(url=drive_link, output=input_path, quiet=False, fuzzy=True)
                     
-                    # בדיקה אם ההורדה מהדרייב הצליחה
                     if not os.path.exists(input_path) or os.path.getsize(input_path) < 1000:
                         st.error("שגיאה בהורדת הקובץ מדרייב. וודא שהקישור פומבי ושזהו באמת קובץ PDF.")
                         return
 
                 output_path = input_path.replace(".pdf", "_fixed.pdf")
 
-                # ביצוע החיתוך
                 if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
                     st.success("החיתוך הושלם בהצלחה!")
+                    
                     with open(output_path, "rb") as f:
                         st.download_button(
                             label="📥 לחץ כאן להורדת הקובץ החתוך",
@@ -151,7 +148,6 @@ def main():
             except Exception as e:
                 st.error(f"אירעה שגיאה בעיבוד: {e}")
             finally:
-                # ניקוי קבצים זמניים
                 if 'input_path' in locals() and os.path.exists(input_path):
                     os.remove(input_path)
                 if 'output_path' in locals() and os.path.exists(output_path):
