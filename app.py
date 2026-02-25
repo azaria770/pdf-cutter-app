@@ -7,17 +7,17 @@ import tempfile
 import streamlit as st
 import gdown
 import re
-import cloudscraper # הספרייה החדשה שעוקפת חסימות
+import cloudscraper
 
-# --- פונקציות סריקה מקוונת (משופר עם עוקף חומות אש) ---
+# --- פונקציות סריקה מקוונת (משופר עם סינון מזהים ובידוד עמוד) ---
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק את אתר המאורות באמצעות CloudScraper כדי לעקוף את שגיאת 403.
+    סורק את האתר, מוצא פוסט מ-72680 ומעלה, 
+    ונכנס לגרסה המבודדת שלו (?force_isolation=true) לשליפת הדרייב.
     """
-    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני (עוקף חומת אש)...")
+    st.info("🛠️ יומן סריקה: מתחיל לחפש את העלון העדכני...")
     try:
-        # יצירת סורק חכם שעוקף הגנות של Cloudflare/WAF
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
         
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
@@ -26,7 +26,7 @@ def get_latest_mishkan_shilo_drive_link():
         response = scraper.get(category_url)
         
         if response.status_code != 200:
-            st.error(f"❌ דיבוג: חומת האש עדיין חוסמת (שגיאה {response.status_code}).")
+            st.error(f"❌ דיבוג: חסימת רשת (שגיאה {response.status_code}).")
             return None
             
         html = response.text
@@ -36,12 +36,19 @@ def get_latest_mishkan_shilo_drive_link():
             st.error("❌ דיבוג: העמוד נטען אך לא נמצאו בו מספרים. ייתכן שכתובת האתר השתנתה.")
             return None
             
-        unique_ids = list(set(post_ids))
-        st.write(f"2. המספרים שנמצאו באתר: {unique_ids}")
+        # סינון: רק מספרים שהם 72680 ומעלה
+        valid_ids = [int(pid) for pid in post_ids if int(pid) >= 72680]
         
-        latest_id = max(int(pid) for pid in post_ids)
-        latest_post_url = f"https://kav.meorot.net/{latest_id}/"
-        st.write(f"3. המספר הגבוה ביותר שנבחר הוא {latest_id}. נכנס לעמוד הפוסט...")
+        if not valid_ids:
+            st.error("❌ דיבוג: לא נמצאו מספרים רלוונטיים (מ-72680 ומעלה).")
+            return None
+            
+        latest_id = max(valid_ids)
+        
+        # הרכבת הקישור המבודד כפי שביקשת
+        latest_post_url = f"https://kav.meorot.net/{latest_id}/?force_isolation=true"
+        st.write(f"2. המספר הגבוה ביותר שנמצא הוא {latest_id}.")
+        st.write(f"3. נכנס לעמוד המבודד: {latest_post_url} ...")
         
         response2 = scraper.get(latest_post_url)
         html2 = response2.text
@@ -52,8 +59,8 @@ def get_latest_mishkan_shilo_drive_link():
             st.success(f"4. ✅ נמצא קישור גוגל דרייב: {found_link}")
             return found_link
         else:
-            st.error("4. ❌ דיבוג: הפוסט נטען בהצלחה, אבל לא נמצא בתוכו קישור לגוגל דרייב.")
-            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט"):
+            st.error("4. ❌ דיבוג: הפוסט המבודד נטען בהצלחה, אבל לא נמצא בתוכו קישור לגוגל דרייב.")
+            with st.expander("🔍 לחץ כאן כדי לראות את קוד ה-HTML של הפוסט המבודד"):
                 st.text(html2)
             return None
     except Exception as e:
