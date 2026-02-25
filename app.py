@@ -11,16 +11,15 @@ import cloudscraper
 import json
 import urllib.parse
 import datetime
-import requests # ספרייה חדשה לתקשורת עם מסד הנתונים בענן
+import requests 
 
-# --- פונקציות סריקה מקוונת (מחוברות למסד נתונים בענן) ---
+# --- פונקציות סריקה מקוונת (סריקה דרך עמוד קטגוריה) ---
 
 DEFAULT_START_ID = 72680
 
 def get_config():
     """שולף את הנתונים ממסד הנתונים בענן (JSONBin)"""
     try:
-        # מוודא שהמשתמש הזין את המפתחות בהגדרות של Streamlit
         if 'JSONBIN_BIN_ID' in st.secrets and 'JSONBIN_API_KEY' in st.secrets:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
             headers = {'X-Master-Key': st.secrets['JSONBIN_API_KEY']}
@@ -48,90 +47,80 @@ def save_config(data):
     except Exception as e:
         st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
 
-def get_next_saturday_noon(from_date):
-    """
-    פונקציית עזר המחשבת מתי תחול שבת בשעה 12:00 בצהריים 
-    מיד לאחר התאריך שסופק לה.
-    """
-    days_ahead = 5 - from_date.weekday()
-    if days_ahead < 0 or (days_ahead == 0 and from_date.hour >= 12):
-        days_ahead += 7
-    next_sat = from_date + datetime.timedelta(days=days_ahead)
-    return next_sat.replace(hour=12, minute=0, second=0, microsecond=0)
-
 def get_latest_mishkan_shilo_drive_link():
-    st.info("🛠️ יומן סריקה: בודק מהו הגיליון הרלוונטי (מול מסד הנתונים בענן)...")
+    st.info("🛠️ יומן סריקה: סורק את עמוד הקטגוריה הראשי למציאת הגיליון העדכני...")
     
-    current_id = DEFAULT_START_ID
-    search_start_id = DEFAULT_START_ID
-    found_date_str = None
-    
-    # 1. קריאת הנתונים השמורים ממסד הנתונים ברשת
+    # קריאת הנתונים השמורים (אופציונלי, כדי לדעת מה היה הגיליון הקודם)
     data = get_config()
     current_id = data.get("last_id", DEFAULT_START_ID)
-    found_date_str = data.get("found_date")
 
-    # 2. חישוב תזמון (האם עברה שבת בצהריים?)
-    if found_date_str:
-        try:
-            found_date = datetime.datetime.fromisoformat(found_date_str)
-            next_sat_noon = get_next_saturday_noon(found_date)
-            
-            if datetime.datetime.now() >= next_sat_noon:
-                # עברה שבת - מתחילים לחפש החל מהמספר הבא!
-                search_start_id = current_id + 1
-                st.write(f"🕒 עברה שבת בצהריים! מדלג על הישן ומתחיל לחפש החל מ-{search_start_id}...")
-            else:
-                # עדיין באותו שבוע
-                search_start_id = current_id
-                st.write(f"🕒 עדיין לא עברה שבת בצהריים. מושך את הגיליון השמור ({search_start_id}).")
-        except:
-            search_start_id = current_id
-    else:
-        search_start_id = current_id
-
-    # 3. תהליך הסריקה
     try:
         scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
-        max_attempts = 50 
         
-        for i in range(0, max_attempts):
-            test_id = search_start_id + i
-            test_url = f"https://kav.meorot.net/{test_id}/"
-            st.write(f"🔍 סורק את {test_url}...")
+        # שלב 1: כניסה לעמוד הקטגוריה הייעודי למשכן שילה
+        category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
+        st.write("🔍 מושך נתונים מעמוד הקטגוריה 'משכן שילה'...")
+        
+        cat_response = scraper.get(category_url)
+        if cat_response.status_code != 200:
+            st.error(f"❌ לא הצלחנו לגשת לעמוד הקטגוריה (קוד {cat_response.status_code}).")
+            return None
             
-            response = scraper.get(test_url)
-            if response.status_code == 200:
-                html = response.text
+        # חיפוש כל המספרים בלינקים שמובילים לפוסטים בעמוד זה
+        post_ids = re.findall(r'kav\.meorot\.net/(\d+)/?', cat_response.text)
+        
+        if not post_ids:
+            st.error("❌ לא מצאנו שום גיליון בעמוד הקטגוריה.")
+            return None
+            
+        # הפיכה למספרים ובחירת המספר הגבוה ביותר (המעודכן ביותר)
+        valid_ids = [int(pid) for pid in post_ids]
+        highest_id = max(valid_ids)
+        
+        st.write(f"✅ המספר הגבוה ביותר שנמצא בקטגוריה הוא: {highest_id}")
+        
+        if highest_id > current_id:
+            st.write(f"🆕 נמצא גיליון חדש! (הקודם ששמור במערכת היה {current_id})")
+        else:
+            st.write(f"🔄 מושך את הגיליון האחרון המוכר ({highest_id}).")
+
+        # שלב 2: כניסה לפוסט הספציפי שנבחר ושליפת הדרייב
+        target_url = f"https://kav.meorot.net/{highest_id}/"
+        st.write(f"🔍 נכנס לדף הגיליון...")
+        
+        response = scraper.get(target_url)
+        if response.status_code == 200:
+            html = response.text
+            
+            drive_patterns = [
+                r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
+                r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)' 
+            ]
+            
+            found_id = None
+            for pattern in drive_patterns:
+                match = re.search(pattern, html)
+                if match:
+                    found_id = match.group(1)
+                    break
+            
+            if found_id:
+                st.success(f"✅ נמצא מזהה קובץ (ID) במספר {highest_id}: {found_id}")
                 
-                drive_patterns = [
-                    r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
-                    r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)' 
-                ]
+                # שמירת ה-ID החדש במסד הנתונים
+                save_config({
+                    "last_id": highest_id,
+                    "found_date": datetime.datetime.now().isoformat()
+                })
                 
-                found_id = None
-                for pattern in drive_patterns:
-                    match = re.search(pattern, html)
-                    if match:
-                        found_id = match.group(1)
-                        break
-                
-                if found_id:
-                    st.success(f"✅ נמצא מזהה קובץ (ID) במספר {test_id}: {found_id}")
-                    
-                    # שומרים את ה-ID החדש יחד עם חותמת הזמן למסד הנתונים בענן!
-                    save_config({
-                        "last_id": test_id,
-                        "found_date": datetime.datetime.now().isoformat()
-                    })
-                    
-                    return found_id
-                else:
-                    st.write(f"   ⚠️ לא נמצא קישור לדרייב בדף {test_id}.")
+                return found_id
             else:
-                st.write(f"   ❌ דף {test_id} לא זמין (סטטוס {response.status_code}).")
-                
-        return None
+                st.error(f"⚠️ לא נמצא קישור לדרייב בדף {highest_id}.")
+                return None
+        else:
+            st.error(f"❌ דף {highest_id} לא זמין (סטטוס {response.status_code}).")
+            return None
+            
     except Exception as e:
         st.error(f"❌ שגיאה בסריקה: {e}")
         return None
