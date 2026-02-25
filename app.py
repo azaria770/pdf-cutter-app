@@ -9,22 +9,25 @@ import gdown
 import urllib.request
 import re
 
-# --- פונקציות סריקה מקוונת (חדש) ---
+# --- פונקציות סריקה מקוונת (משופר ואגרסיבי יותר) ---
 
 def get_latest_mishkan_shilo_drive_link():
     """
-    סורק את אתר המאורות, מוצא את המספר הגבוה ביותר, 
-    נכנס לפוסט ושולף את קישור הגוגל דרייב.
+    סורק את אתר המאורות באופן אגרסיבי, מוצא את המספר הגבוה ביותר, 
+    נכנס לפוסט ושולף את קישור הגוגל דרייב גם אם הוא חבוי בקוד.
     """
     try:
-        # 1. שליפת עמוד הקטגוריה
         category_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        req = urllib.request.Request(category_url, headers={'User-Agent': 'Mozilla/5.0'})
+        # הוספת User-Agent מלא של כרום כדי למנוע חסימות אבטחה של האתר
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'}
+        
+        # 1. שליפת עמוד הקטגוריה
+        req = urllib.request.Request(category_url, headers=headers)
         with urllib.request.urlopen(req) as response:
             html = response.read().decode('utf-8')
         
-        # 2. מציאת כל מספרי הפוסטים (הנתיבים עם המספרים)
-        post_ids = re.findall(r'https://kav\.meorot\.net/(\d+)/', html)
+        # 2. מציאת מספרי פוסטים - חיפוש גמיש יותר
+        post_ids = re.findall(r'kav\.meorot\.net/(\d+)', html)
         if not post_ids:
             return None
         
@@ -33,20 +36,19 @@ def get_latest_mishkan_shilo_drive_link():
         latest_post_url = f"https://kav.meorot.net/{latest_id}/"
         
         # 4. כניסה לפוסט הרלוונטי
-        req2 = urllib.request.Request(latest_post_url, headers={'User-Agent': 'Mozilla/5.0'})
+        req2 = urllib.request.Request(latest_post_url, headers=headers)
         with urllib.request.urlopen(req2) as response2:
             html2 = response2.read().decode('utf-8')
             
-        # 5. חילוץ קישור גוגל דרייב
-        drive_links = re.findall(r'(https://drive\.google\.com/file[^"\']+)', html2)
-        if not drive_links:
-            return None
+        # 5. חילוץ קישור גוגל דרייב - חיפוש אגרסיבי למזהה (ID) של הקובץ
+        drive_match = re.search(r'(https://drive\.google\.com/file/d/[a-zA-Z0-9_-]+)', html2)
+        if drive_match:
+            return drive_match.group(1)
             
-        return drive_links[0]
+        return None
     except Exception as e:
         print(f"Error fetching auto link: {e}")
         return None
-
 
 # --- פונקציות לוגיקה ---
 
@@ -180,7 +182,7 @@ def main():
                     gdown.download(url=drive_link, output=input_path, quiet=False, fuzzy=True)
                     
                     if not os.path.exists(input_path) or os.path.getsize(input_path) < 1000:
-                        st.error("שגיאה בהורדת הקובץ מדרייב. וודא שהקישור פומבי ושזהו באמת קובץ PDF.")
+                        st.error("שגיאה בהורדת הקובץ מדרייב. ייתכן שהקישור אינו פומבי או שאינו קובץ PDF תקין.")
                         return
 
                 output_path = input_path.replace(".pdf", "_fixed.pdf")
