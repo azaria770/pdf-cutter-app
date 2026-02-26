@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
 AUTO_CUT_PDF = "auto_cut_document.pdf"
+AUTO_CUT_PDF_BW = "auto_cut_document_bw.pdf" # הוספנו משתנה לקובץ השחור-לבן
 
 # --- פונקציות מסד נתונים וזמן ---
 
@@ -117,6 +118,9 @@ def prepare_auto_pdf():
 
     # החזרת הקובץ המוכן אם כבר נחתך ואין חדש באופק
     if not found_new and os.path.exists(AUTO_CUT_PDF):
+        # מוודא שגם קובץ השחור-לבן קיים, ואם לא - מייצר אותו
+        if not os.path.exists(AUTO_CUT_PDF_BW):
+            convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
         return True, None, last_title
 
     if not target_drive_id:
@@ -156,6 +160,9 @@ def prepare_auto_pdf():
     os.remove(downloaded_path)
 
     if success:
+        # יצירת עותק שחור-לבן מיד לאחר החיתוך
+        convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
+        
         if found_new or last_title != original_filename:
             save_config({
                 "last_post_id": target_post_id,
@@ -167,7 +174,7 @@ def prepare_auto_pdf():
     else:
         return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש.", None
 
-# --- פונקציות לוגיקת החיתוך ---
+# --- פונקציות לוגיקת החיתוך והמרת צבעים ---
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -210,13 +217,27 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
     doc.close()
     return False
 
+def convert_pdf_to_grayscale(input_pdf_path, output_pdf_path):
+    """פונקציה חדשה להמרת PDF לשחור-לבן"""
+    doc = fitz.open(input_pdf_path)
+    new_doc = fitz.open()
+    for page_num in range(len(doc)):
+        page = doc.load_page(page_num)
+        # שימוש במטריצה 2.0 שומר על רזולוציה טובה לקריאה בהדפסה
+        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csGRAY)
+        img_pdf = fitz.open("pdf", pix.pdfout())
+        new_doc.insert_pdf(img_pdf)
+        img_pdf.close()
+    new_doc.save(output_pdf_path, garbage=3, deflate=True)
+    new_doc.close()
+    doc.close()
+
 # --- ממשק משתמש ---
 
 def main():
     st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     
-    # --- התיקון: כותרת קבועה לאתר ---
     st.title('סיכום פרשת שבוע מגיליון "משכן שילה"')
     
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
@@ -231,21 +252,38 @@ def main():
             success, error_msg, target_title = prepare_auto_pdf()
         
         if success and os.path.exists(AUTO_CUT_PDF):
-            st.success("✅ הקובץ מוכן עבורך!")
+            st.success("✅ הקבצים מוכנים עבורך!")
             
-            # הכנת שם הקובץ (מוודאים שתמיד תהיה לו סיומת תקינה)
+            # הכנת השמות
             safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip()
             if not safe_filename.lower().endswith('.pdf'):
                 safe_filename += ".pdf"
             
-            with open(AUTO_CUT_PDF, "rb") as f:
-                # התיקון: השם המלא מופיע רק על הכפתור עצמו
-                st.download_button(
-                    label=f"📥 להורדת: {safe_filename}", 
-                    data=f, 
-                    file_name=safe_filename, 
-                    mime="application/pdf"
-                )
+            safe_filename_bw = safe_filename.replace(".pdf", " - שחור לבן.pdf")
+            
+            # הצגת הכפתורים זה לצד זה
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                with open(AUTO_CUT_PDF, "rb") as f:
+                    st.download_button(
+                        label=f"🌈 הורדה (צבעוני): {safe_filename}", 
+                        data=f, 
+                        file_name=safe_filename, 
+                        mime="application/pdf",
+                        key="btn_auto_color"
+                    )
+            
+            with col2:
+                if os.path.exists(AUTO_CUT_PDF_BW):
+                    with open(AUTO_CUT_PDF_BW, "rb") as f:
+                        st.download_button(
+                            label=f"🖨️ הורדה (שחור-לבן): {safe_filename_bw}", 
+                            data=f, 
+                            file_name=safe_filename_bw, 
+                            mime="application/pdf",
+                            key="btn_auto_bw"
+                        )
         else:
             st.error(error_msg)
 
@@ -279,16 +317,25 @@ def main():
                             input_path = tmp.name
                         
                         output_path = input_path.replace(".pdf", "_fixed.pdf")
+                        output_path_bw = input_path.replace(".pdf", "_fixed_bw.pdf")
+                        
                         if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
+                            convert_pdf_to_grayscale(output_path, output_path_bw)
                             st.success("החיתוך בוצע בהצלחה!")
                             
                             safe_manual_name = uploaded_file.name
                             if not safe_manual_name.lower().endswith('.pdf'):
                                 safe_manual_name += ".pdf"
                             safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
+                            safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
                                 
-                            with open(output_path, "rb") as f:
-                                st.download_button(f"📥 להורדת: {safe_manual_name}", f, safe_manual_name, "application/pdf")
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                with open(output_path, "rb") as f:
+                                    st.download_button(f"🌈 הורדה (צבעוני): {safe_manual_name}", f, safe_manual_name, "application/pdf")
+                            with col2:
+                                with open(output_path_bw, "rb") as f:
+                                    st.download_button(f"🖨️ הורדה (שחור-לבן): {safe_manual_name_bw}", f, safe_manual_name_bw, "application/pdf")
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                     
@@ -315,12 +362,22 @@ def main():
                             else:
                                 safe_manual_name += "_fixed.pdf"
                                 
+                            safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
+                                
                             output_path = "temp_fixed.pdf"
+                            output_path_bw = "temp_fixed_bw.pdf"
                             
                             if extract_pdf_by_images(downloaded_path, output_path, start_b64, end_b64):
+                                convert_pdf_to_grayscale(output_path, output_path_bw)
                                 st.success("החיתוך בוצע בהצלחה!")
-                                with open(output_path, "rb") as f:
-                                    st.download_button(f"📥 להורדת: {safe_manual_name}", f, safe_manual_name, "application/pdf")
+                                
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    with open(output_path, "rb") as f:
+                                        st.download_button(f"🌈 הורדה (צבעוני): {safe_manual_name}", f, safe_manual_name, "application/pdf")
+                                with col2:
+                                    with open(output_path_bw, "rb") as f:
+                                        st.download_button(f"🖨️ הורדה (שחור-לבן): {safe_manual_name_bw}", f, safe_manual_name_bw, "application/pdf")
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
