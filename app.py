@@ -231,7 +231,6 @@ def main():
     st.set_page_config(page_title="הורדת סיכום פרשה - משכן שילה", page_icon="📄")
     st.markdown("<style>.block-container { direction: rtl; text-align: right; }</style>", unsafe_allow_html=True)
     
-    # --- התיקון: כותרת ממורכזת ב-HTML ---
     st.markdown('<h1 style="text-align: center;">סיכום פרשת שבוע מגיליון "משכן שילה"</h1>', unsafe_allow_html=True)
     
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
@@ -255,8 +254,8 @@ def main():
             safe_filename_bw = safe_filename.replace(".pdf", " - שחור לבן.pdf")
             display_title = safe_filename.replace(".pdf", "")
             
-            # --- התיקון: יישור לימין של כותרת המשנה באמצעות HTML ---
-            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מגיליון "{display_title}"</h3>', unsafe_allow_html=True)
+            # --- התיקון: הסרת המילה 'מגיליון' ---
+            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_title}"</h3>', unsafe_allow_html=True)
             
             col1, col2 = st.columns(2)
             
@@ -324,8 +323,8 @@ def main():
                             safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
                             display_manual_title = safe_manual_name.replace(".pdf", "")
                             
-                            # --- התיקון: יישור לימין של כותרת המשנה במצב הידני ---
-                            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מגיליון "{display_manual_title}"</h3>', unsafe_allow_html=True)
+                            # --- התיקון למצב הידני ---
+                            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
                             col1, col2 = st.columns(2)
                                 
                             with open(output_path, "rb") as f_color:
@@ -368,8 +367,8 @@ def main():
                                 convert_pdf_to_bw(output_path, output_bw_path) 
                                 st.success("החיתוך בוצע בהצלחה!")
                                 
-                                # --- התיקון: יישור לימין של כותרת המשנה במצב הלינק מהדרייב ---
-                                st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מגיליון "{display_manual_title}"</h3>', unsafe_allow_html=True)
+                                # --- התיקון למצב הלינק מהדרייב ---
+                                st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
                                 col1, col2 = st.columns(2)
                                 
                                 with open(output_path, "rb") as f_color:
