@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
 AUTO_CUT_PDF = "auto_cut_document.pdf"
-AUTO_CUT_PDF_BW = "auto_cut_document_bw.pdf" # הוספנו משתנה לקובץ השחור-לבן
+AUTO_CUT_PDF_BW = "auto_cut_document_bw.pdf" 
 
 # --- פונקציות מסד נתונים וזמן ---
 
@@ -116,9 +116,7 @@ def prepare_auto_pdf():
                                     found_new = True
                                     break
 
-    # החזרת הקובץ המוכן אם כבר נחתך ואין חדש באופק
     if not found_new and os.path.exists(AUTO_CUT_PDF):
-        # מוודא שגם קובץ השחור-לבן קיים, ואם לא - מייצר אותו
         if not os.path.exists(AUTO_CUT_PDF_BW):
             convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
         return True, None, last_title
@@ -141,7 +139,6 @@ def prepare_auto_pdf():
     if not downloaded_path:
         return False, "שגיאה בהורדת הקובץ מגוגל דרייב.", None
 
-    # חילוץ השם המדויק מגוגל דרייב
     original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
 
     if os.path.getsize(downloaded_path) < 100000:
@@ -160,7 +157,6 @@ def prepare_auto_pdf():
     os.remove(downloaded_path)
 
     if success:
-        # יצירת עותק שחור-לבן מיד לאחר החיתוך
         convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
         
         if found_new or last_title != original_filename:
@@ -218,16 +214,19 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
     return False
 
 def convert_pdf_to_grayscale(input_pdf_path, output_pdf_path):
-    """פונקציה חדשה להמרת PDF לשחור-לבן"""
+    """פונקציה חדשה להמרת PDF לשחור-לבן התואמת לגרסאות מודרניות של PyMuPDF"""
     doc = fitz.open(input_pdf_path)
     new_doc = fitz.open()
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
+        
         # שימוש במטריצה 2.0 שומר על רזולוציה טובה לקריאה בהדפסה
         pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csGRAY)
-        img_pdf = fitz.open("pdf", pix.pdfout())
-        new_doc.insert_pdf(img_pdf)
-        img_pdf.close()
+        
+        # התיקון: יצירת דף חדש ברוחב ובגובה של הדף המקורי, והזרקת תמונת הפיקסלים אליו
+        new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
+        new_page.insert_image(page.rect, pixmap=pix)
+        
     new_doc.save(output_pdf_path, garbage=3, deflate=True)
     new_doc.close()
     doc.close()
@@ -254,14 +253,12 @@ def main():
         if success and os.path.exists(AUTO_CUT_PDF):
             st.success("✅ הקבצים מוכנים עבורך!")
             
-            # הכנת השמות
             safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip()
             if not safe_filename.lower().endswith('.pdf'):
                 safe_filename += ".pdf"
             
             safe_filename_bw = safe_filename.replace(".pdf", " - שחור לבן.pdf")
             
-            # הצגת הכפתורים זה לצד זה
             col1, col2 = st.columns(2)
             
             with col1:
