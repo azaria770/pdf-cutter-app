@@ -17,7 +17,7 @@ from bs4 import BeautifulSoup
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
 AUTO_CUT_PDF = "auto_cut_document.pdf"
-AUTO_CUT_PDF_BW = "auto_cut_document_bw.pdf" 
+AUTO_CUT_BW_PDF = "auto_cut_document_bw.pdf" 
 
 # --- פונקציות מסד נתונים וזמן ---
 
@@ -116,9 +116,10 @@ def prepare_auto_pdf():
                                     found_new = True
                                     break
 
+    # החזרת הקובץ המוכן אם כבר נחתך ואין חדש באופק
     if not found_new and os.path.exists(AUTO_CUT_PDF):
-        if not os.path.exists(AUTO_CUT_PDF_BW):
-            convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
+        if not os.path.exists(AUTO_CUT_BW_PDF):
+            convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         return True, None, last_title
 
     if not target_drive_id:
@@ -157,7 +158,7 @@ def prepare_auto_pdf():
     os.remove(downloaded_path)
 
     if success:
-        convert_pdf_to_grayscale(AUTO_CUT_PDF, AUTO_CUT_PDF_BW)
+        convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         
         if found_new or last_title != original_filename:
             save_config({
@@ -170,7 +171,18 @@ def prepare_auto_pdf():
     else:
         return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש.", None
 
-# --- פונקציות לוגיקת החיתוך והמרת צבעים ---
+# --- פונקציות לוגיקת החיתוך והמרה לשחור-לבן ---
+
+def convert_pdf_to_bw(input_path, output_path):
+    doc = fitz.open(input_path)
+    bw_doc = fitz.open()
+    for page in doc:
+        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(2, 2))
+        bw_page = bw_doc.new_page(width=page.rect.width, height=page.rect.height)
+        bw_page.insert_image(page.rect, pixmap=pix)
+    bw_doc.save(output_path)
+    bw_doc.close()
+    doc.close()
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
@@ -213,24 +225,6 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
     doc.close()
     return False
 
-def convert_pdf_to_grayscale(input_pdf_path, output_pdf_path):
-    """פונקציה חדשה להמרת PDF לשחור-לבן התואמת לגרסאות מודרניות של PyMuPDF"""
-    doc = fitz.open(input_pdf_path)
-    new_doc = fitz.open()
-    for page_num in range(len(doc)):
-        page = doc.load_page(page_num)
-        
-        # שימוש במטריצה 2.0 שומר על רזולוציה טובה לקריאה בהדפסה
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csGRAY)
-        
-        # התיקון: יצירת דף חדש ברוחב ובגובה של הדף המקורי, והזרקת תמונת הפיקסלים אליו
-        new_page = new_doc.new_page(width=page.rect.width, height=page.rect.height)
-        new_page.insert_image(page.rect, pixmap=pix)
-        
-    new_doc.save(output_pdf_path, garbage=3, deflate=True)
-    new_doc.close()
-    doc.close()
-
 # --- ממשק משתמש ---
 
 def main():
@@ -251,36 +245,39 @@ def main():
             success, error_msg, target_title = prepare_auto_pdf()
         
         if success and os.path.exists(AUTO_CUT_PDF):
-            st.success("✅ הקבצים מוכנים עבורך!")
+            st.success("✅ הקובץ מוכן עבורך!")
             
             safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip()
             if not safe_filename.lower().endswith('.pdf'):
                 safe_filename += ".pdf"
             
             safe_filename_bw = safe_filename.replace(".pdf", " - שחור לבן.pdf")
+            display_title = safe_filename.replace(".pdf", "") # מוריד את הסיומת .pdf מהתצוגה
             
+            # --- העיצוב החדש ---
+            st.markdown(f'### להורדת סיכום פרשת השבוע מגיליון "{display_title}"')
+            
+            # יצירת עמודות כדי שהכפתורים יהיו זה לצד זה
             col1, col2 = st.columns(2)
             
-            with col1:
-                with open(AUTO_CUT_PDF, "rb") as f:
-                    st.download_button(
-                        label=f"🌈 הורדה (צבעוני): {safe_filename}", 
-                        data=f, 
-                        file_name=safe_filename, 
+            with open(AUTO_CUT_PDF, "rb") as f_color:
+                col1.download_button(
+                    label="📥 פורמט צבעוני", 
+                    data=f_color, 
+                    file_name=safe_filename, 
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+                
+            if os.path.exists(AUTO_CUT_BW_PDF):
+                with open(AUTO_CUT_BW_PDF, "rb") as f_bw:
+                    col2.download_button(
+                        label="🖨️ פורמט שחור לבן", 
+                        data=f_bw, 
+                        file_name=safe_filename_bw, 
                         mime="application/pdf",
-                        key="btn_auto_color"
+                        use_container_width=True
                     )
-            
-            with col2:
-                if os.path.exists(AUTO_CUT_PDF_BW):
-                    with open(AUTO_CUT_PDF_BW, "rb") as f:
-                        st.download_button(
-                            label=f"🖨️ הורדה (שחור-לבן): {safe_filename_bw}", 
-                            data=f, 
-                            file_name=safe_filename_bw, 
-                            mime="application/pdf",
-                            key="btn_auto_bw"
-                        )
         else:
             st.error(error_msg)
 
@@ -314,10 +311,10 @@ def main():
                             input_path = tmp.name
                         
                         output_path = input_path.replace(".pdf", "_fixed.pdf")
-                        output_path_bw = input_path.replace(".pdf", "_fixed_bw.pdf")
+                        output_bw_path = input_path.replace(".pdf", "_fixed_bw.pdf")
                         
                         if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
-                            convert_pdf_to_grayscale(output_path, output_path_bw)
+                            convert_pdf_to_bw(output_path, output_bw_path) 
                             st.success("החיתוך בוצע בהצלחה!")
                             
                             safe_manual_name = uploaded_file.name
@@ -325,14 +322,16 @@ def main():
                                 safe_manual_name += ".pdf"
                             safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
                             safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
-                                
+                            display_manual_title = safe_manual_name.replace(".pdf", "")
+                            
+                            # --- החלת אותו עיצוב גם במצב הידני ---
+                            st.markdown(f'### להורדת סיכום פרשת השבוע מגיליון "{display_manual_title}"')
                             col1, col2 = st.columns(2)
-                            with col1:
-                                with open(output_path, "rb") as f:
-                                    st.download_button(f"🌈 הורדה (צבעוני): {safe_manual_name}", f, safe_manual_name, "application/pdf")
-                            with col2:
-                                with open(output_path_bw, "rb") as f:
-                                    st.download_button(f"🖨️ הורדה (שחור-לבן): {safe_manual_name_bw}", f, safe_manual_name_bw, "application/pdf")
+                                
+                            with open(output_path, "rb") as f_color:
+                                col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
+                            with open(output_bw_path, "rb") as f_bw:
+                                col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                     
@@ -360,21 +359,23 @@ def main():
                                 safe_manual_name += "_fixed.pdf"
                                 
                             safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
-                                
+                            display_manual_title = safe_manual_name.replace(".pdf", "")
+                            
                             output_path = "temp_fixed.pdf"
-                            output_path_bw = "temp_fixed_bw.pdf"
+                            output_bw_path = "temp_fixed_bw.pdf"
                             
                             if extract_pdf_by_images(downloaded_path, output_path, start_b64, end_b64):
-                                convert_pdf_to_grayscale(output_path, output_path_bw)
+                                convert_pdf_to_bw(output_path, output_bw_path) 
                                 st.success("החיתוך בוצע בהצלחה!")
                                 
+                                # --- החלת אותו עיצוב גם במצב הלינק מהדרייב ---
+                                st.markdown(f'### להורדת סיכום פרשת השבוע מגיליון "{display_manual_title}"')
                                 col1, col2 = st.columns(2)
-                                with col1:
-                                    with open(output_path, "rb") as f:
-                                        st.download_button(f"🌈 הורדה (צבעוני): {safe_manual_name}", f, safe_manual_name, "application/pdf")
-                                with col2:
-                                    with open(output_path_bw, "rb") as f:
-                                        st.download_button(f"🖨️ הורדה (שחור-לבן): {safe_manual_name_bw}", f, safe_manual_name_bw, "application/pdf")
+                                
+                                with open(output_path, "rb") as f_color:
+                                    col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
+                                with open(output_bw_path, "rb") as f_bw:
+                                    col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
