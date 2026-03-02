@@ -174,20 +174,24 @@ def prepare_auto_pdf():
 # --- פונקציות לוגיקת החיתוך והמרה לשחור-לבן ---
 
 def convert_pdf_to_bw(input_path, output_path):
-    """ממיר קובץ PDF לגרסת שחור-לבן קלת משקל"""
+    """ממיר קובץ PDF לגרסת שחור-לבן קלת משקל מאוד"""
     doc = fitz.open(input_path)
     bw_doc = fitz.open()
     for page in doc:
-        # יצירת תמונה של העמוד בשחור לבן
-        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(2, 2))
+        # הקטנת רזולוציית ה"צילום" כדי לחסוך במשקל (1.5 במקום 2 - עדיין קריא וברור לחלוטין)
+        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(1.5, 1.5))
+        
+        # מעבר ל-Numpy כדי לשלוט באיכות הדחיסה דרך OpenCV
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
+        
+        # התיקון הקריטי: דחיסה אגרסיבית ל-JPEG באיכות 60% (מעולה לטקסט, שוקל כלום)
+        _, encoded_img = cv2.imencode('.jpg', img_array, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        
         bw_page = bw_doc.new_page(width=page.rect.width, height=page.rect.height)
+        bw_page.insert_image(page.rect, stream=encoded_img.tobytes())
         
-        # התיקון: דחיסת התמונה ל-JPEG במקום להדביק אותה כפיקסלים גולמיים
-        img_data = pix.tobytes("jpeg")
-        bw_page.insert_image(page.rect, stream=img_data)
-        
-    # התיקון: הפעלת דחיסה מקסימלית (deflate) וניקוי שאריות זיכרון (garbage) בשמירה
-    bw_doc.save(output_path, deflate=True, garbage=3)
+    # שמירה עם מנגנון ניקוי שאריות מקסימלי (garbage=4) ודחיסה (deflate=True)
+    bw_doc.save(output_path, deflate=True, garbage=4)
     bw_doc.close()
     doc.close()
 
