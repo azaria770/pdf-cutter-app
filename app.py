@@ -174,23 +174,20 @@ def prepare_auto_pdf():
 # --- פונקציות לוגיקת החיתוך והמרה לשחור-לבן ---
 
 def convert_pdf_to_bw(input_path, output_path):
-    """ממיר קובץ PDF לגרסת שחור-לבן קלת משקל מאוד"""
+    """ממיר קובץ PDF לגרסת שחור-לבן תוך שמירה על איכות פיקסלים מושלמת (Lossless)"""
     doc = fitz.open(input_path)
     bw_doc = fitz.open()
     for page in doc:
-        # הקטנת רזולוציית ה"צילום" כדי לחסוך במשקל (1.5 במקום 2 - עדיין קריא וברור לחלוטין)
-        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(1.5, 1.5))
+        # רזולוציה גבוהה (פי 2) כדי לשמור על כל פיקסל ברור וחד (ללא טשטוש)
+        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(2, 2))
         
-        # מעבר ל-Numpy כדי לשלוט באיכות הדחיסה דרך OpenCV
-        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
-        
-        # התיקון הקריטי: דחיסה אגרסיבית ל-JPEG באיכות 60% (מעולה לטקסט, שוקל כלום)
-        _, encoded_img = cv2.imencode('.jpg', img_array, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+        # שימוש בפורמט PNG שהוא ללא אובדן נתונים (Lossless) ומצוין לדחיסת משטחי טקסט לבנים/שחורים
+        img_data = pix.tobytes("png")
         
         bw_page = bw_doc.new_page(width=page.rect.width, height=page.rect.height)
-        bw_page.insert_image(page.rect, stream=encoded_img.tobytes())
+        bw_page.insert_image(page.rect, stream=img_data)
         
-    # שמירה עם מנגנון ניקוי שאריות מקסימלי (garbage=4) ודחיסה (deflate=True)
+    # שמירה עם מנגנון ניקוי שאריות מקסימלי ודחיסה ברמת ה-PDF עצמו (מבלי לפגוע בתמונות)
     bw_doc.save(output_path, deflate=True, garbage=4)
     bw_doc.close()
     doc.close()
