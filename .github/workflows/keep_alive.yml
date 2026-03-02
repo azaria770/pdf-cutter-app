@@ -1,0 +1,24 @@
+name: Keep Streamlit App Alive
+
+on:
+  schedule:
+    # מריץ את הפעולה כל יומיים בחצות (UTC)
+    - cron: '0 0 */2 * *' 
+  workflow_dispatch: # מאפשר גם הפעלה ידנית בלחיצת כפתור מ-GitHub
+
+jobs:
+  keep-alive:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # נדרש כדי לאפשר לבוט לדחוף קוד למאגר
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create and push empty commit
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git commit --allow-empty -m "Auto-commit to keep Streamlit app alive"
+          git push
