@@ -13,6 +13,7 @@ import urllib.parse
 import datetime
 import requests 
 from bs4 import BeautifulSoup
+import subprocess  # <--- הוספנו כדי להפעיל את Ghostscript
 
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
@@ -174,23 +175,28 @@ def prepare_auto_pdf():
 # --- פונקציות לוגיקת החיתוך והמרה לשחור-לבן ---
 
 def convert_pdf_to_bw(input_path, output_path):
-    """ממיר קובץ PDF לגרסת שחור-לבן תוך שמירה על איכות פיקסלים מושלמת (Lossless)"""
-    doc = fitz.open(input_path)
-    bw_doc = fitz.open()
-    for page in doc:
-        # רזולוציה גבוהה (פי 2) כדי לשמור על כל פיקסל ברור וחד (ללא טשטוש)
-        pix = page.get_pixmap(colorspace=fitz.csGRAY, matrix=fitz.Matrix(2, 2))
-        
-        # שימוש בפורמט PNG שהוא ללא אובדן נתונים (Lossless) ומצוין לדחיסת משטחי טקסט לבנים/שחורים
-        img_data = pix.tobytes("png")
-        
-        bw_page = bw_doc.new_page(width=page.rect.width, height=page.rect.height)
-        bw_page.insert_image(page.rect, stream=img_data)
-        
-    # שמירה עם מנגנון ניקוי שאריות מקסימלי ודחיסה ברמת ה-PDF עצמו (מבלי לפגוע בתמונות)
-    bw_doc.save(output_path, deflate=True, garbage=4)
-    bw_doc.close()
-    doc.close()
+    """ממיר קובץ PDF לגרסת שחור-לבן איכותית ווקטורית באמצעות המנוע של Ghostscript"""
+    gs_cmd = [
+        "gs",
+        "-sOutputFile=" + output_path,
+        "-sDEVICE=pdfwrite",
+        "-sColorConversionStrategy=Gray",
+        "-dProcessColorModel=/DeviceGray",
+        "-dCompatibilityLevel=1.4",
+        "-dNOPAUSE",
+        "-dBATCH",
+        "-dQUIET",
+        input_path
+    ]
+    try:
+        # הפעלת מנוע המערכת ברקע
+        subprocess.run(gs_cmd, check=True)
+    except Exception as e:
+        # במקרה שבו Ghostscript נכשל (למשל, שכחת ליצור את קובץ ה-packages.txt),
+        # נייצר עותק צבעוני רגיל כדי שהאתר לא יקרוס
+        import shutil
+        shutil.copy(input_path, output_path)
+        print(f"Ghostscript error: {e}")
 
 def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
