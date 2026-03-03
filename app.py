@@ -259,41 +259,58 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 50
         crop_height = height - bottom_margin
 
-        blocks = page.get_text("blocks")
+        # שולפים מילים כדי לבצע ניתוח מדויק יותר
+        words = page.get_text("words")
         
-        # סינון מחמיר לטקסט
-        col_blocks = [b for b in blocks if b[6] == 0 and (b[2] - b[0]) < width * 0.4 and b[1] >= top_margin and b[3] <= crop_height]
+        # סינון מילים שמופיעות רק בחלק האמצעי של העמוד (כדי לא להיות מושפעים מתמונות וכותרות רחבות למעלה/למטה)
+        mid_y_top = height * 0.3
+        mid_y_bottom = height * 0.7
+        mid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
         
-        left_x0, left_x1 = width, 0
-        mid_x0, mid_x1 = width, 0
-        right_x0, right_x1 = width, 0
+        # חלוקת המילים במרכז ל-3 קבוצות לפי מיקום אופקי משוער
+        left_words = [w for w in mid_words if (w[0]+w[2])/2 < width / 3]
+        center_words = [w for w in mid_words if width / 3 <= (w[0]+w[2])/2 < 2 * width / 3]
+        right_words = [w for w in mid_words if (w[0]+w[2])/2 >= 2 * width / 3]
         
-        found_left, found_mid, found_right = False, False, False
-        
-        for b in col_blocks:
-            cx = (b[0] + b[2]) / 2
-            if cx < width / 3: 
-                left_x0, left_x1 = min(left_x0, b[0]), max(left_x1, b[2])
-                found_left = True
-            elif cx < 2 * width / 3: 
-                mid_x0, mid_x1 = min(mid_x0, b[0]), max(mid_x1, b[2])
-                found_mid = True
-            else: 
-                right_x0, right_x1 = min(right_x0, b[0]), max(right_x1, b[2])
-                found_right = True
-        
-        pad = 1
-        
-        right_col = fitz.Rect(right_x0 - pad, top_margin, right_x1 + pad, crop_height) if found_right else None
-        middle_col = fitz.Rect(mid_x0 - pad, top_margin, mid_x1 + pad, crop_height) if found_mid else None
-        left_col = fitz.Rect(left_x0 - pad, top_margin, left_x1 + pad, crop_height) if found_left else None
+        # חישוב אמצע המרווח (ה-gap) האמיתי בין הטורים
+        if left_words and center_words:
+            max_left_x = max([w[2] for w in left_words])
+            min_center_x = min([w[0] for w in center_words])
+            split_left_mid = (max_left_x + min_center_x) / 2
+        else:
+            split_left_mid = width / 3
+            
+        if center_words and right_words:
+            max_center_x = max([w[2] for w in center_words])
+            min_right_x = min([w[0] for w in right_words])
+            split_mid_right = (max_center_x + min_right_x) / 2
+        else:
+            split_mid_right = 2 * width / 3
+            
+        # הגדרת הגבולות החיצוניים הקיצוניים של העמוד (ללא שוליים ריקים)
+        all_valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
+        if all_valid_words:
+            page_min_x = min([w[0] for w in all_valid_words])
+            page_max_x = max([w[2] for w in all_valid_words])
+        else:
+            page_min_x = 0
+            page_max_x = width
 
-        columns = [c for c in [right_col, middle_col, left_col] if c is not None and c.width > 0]
+        # יצירת מלבני החיתוך (Rect) על בסיס קווי ההפרדה שחישבנו
+        right_col = fitz.Rect(split_mid_right, top_margin, page_max_x, crop_height)
+        middle_col = fitz.Rect(split_left_mid, top_margin, split_mid_right, crop_height)
+        left_col = fitz.Rect(page_min_x, top_margin, split_left_mid, crop_height)
+
+        columns = [right_col, middle_col, left_col]
 
         page_dict = page.get_text("dict")
         images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
 
         for col_idx, col_rect in enumerate(columns):
+            # מוודאים שהטור לא ריק (רוחב תקין) לפני יצירת עמוד
+            if col_rect.width <= 0 or col_rect.height <= 0:
+                continue
+                
             new_page = out_doc.new_page(width=col_rect.width, height=col_rect.height)
             new_page.show_pdf_page(new_page.rect, doc, page_num, clip=col_rect)
 
