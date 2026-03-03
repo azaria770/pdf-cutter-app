@@ -257,57 +257,55 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 50
         crop_height = height - bottom_margin
 
-        words = page.get_text("words")
-        
-        # התמקדות רק בטקסט שבמרכז העמוד כדי לא להיות מושפעים מכותרות רחבות ותמונות
-        mid_y_top = height * 0.25
-        mid_y_bottom = height * 0.75
-        mid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
-        
-        # --- אלגוריתם חיתוך מבוסס מפת צפיפות (Histogram) ---
-        # יוצרים מערך שמייצג כל פיקסל לרוחב העמוד
-        width_int = int(width)
-        x_density = np.zeros(width_int)
-        
-        # מוסיפים 'משקל' לכל פיקסל שמופיע בו טקסט
-        for w in mid_words:
-            x0, x1 = int(max(0, w[0])), int(min(width_int - 1, w[2]))
-            x_density[x0:x1+1] += 1
+        # --- אלגוריתם חיתוך מתקדם מבוסס ראייה ממוחשבת (OpenCV) ---
+        try:
+            # 1. יצירת צילום של מרכז העמוד כפי שהעין האנושית רואה אותו
+            pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), colorspace=fitz.csGRAY)
+            img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
             
-        def find_best_cut(density, start_pct, end_pct):
-            """מוצא את אמצע 'העמק הלבן' ביותר באזור הצפוי של המרווח"""
-            start_idx = int(width * start_pct)
-            end_idx = int(width * end_pct)
-            sub_array = density[start_idx:end_idx]
+            # 2. סינון קשיח לשחור ולבן טהור (מעלים צלליות ורקעים)
+            _, thresh = cv2.threshold(img, 200, 255, cv2.THRESH_BINARY_INV)
             
-            if len(sub_array) == 0:
-                return (start_idx + end_idx) / 2
-                
-            min_val = np.min(sub_array)
-            # מאתרים את כל הפיקסלים שבהם צפיפות הטקסט היא מינימלית (השטח הריק)
-            min_indices = np.where(sub_array == min_val)[0]
-            # לוקחים את האמצע המדויק של השטח הריק הזה
-            best_local_x = int(np.median(min_indices))
-            return start_idx + best_local_x
+            # 3. נתמקד רק באזור המרכזי של העמוד (מתעלם מתמונות למעלה או כותרות תחתונות רחבות)
+            h_img, w_img = thresh.shape
+            roi = thresh[int(h_img * 0.25):int(h_img * 0.75), :]
+            
+            # 4. סכימת הצפיפות של הפיקסלים לאורך כל העמוד. 
+            # אזור שאין בו פיקסלים לבנים (טקסט) יקבל ערך קרוב לאפס וייצג את ההפרדה.
+            proj = np.sum(roi, axis=0)
+            
+            def find_gutter_center(projection, start_pct, end_pct):
+                start_idx = int(w_img * start_pct)
+                end_idx = int(w_img * end_pct)
+                zone = projection[start_idx:end_idx]
+                min_val = np.min(zone)
+                # מציאת כל הנקודות שמרכיבות את המרווח הריק (העמק בגרף)
+                min_indices = np.where(zone == min_val)[0]
+                # לקיחת החציון - מיקום החיתוך יהיה הפיקסל שנמצא בדיוק באמצע המרווח!
+                return start_idx + int(np.median(min_indices))
+            
+            # 5. זיהוי נקודות האמצע של המרווחים באזורים הצפויים
+            cut1_img_x = find_gutter_center(proj, 0.28, 0.38)
+            cut2_img_x = find_gutter_center(proj, 0.62, 0.72)
+            
+            # 6. תרגום הפיקסלים בחזרה לקואורדינטות המדויקות בקובץ ה-PDF
+            scale_x = width / w_img
+            split_left_mid = cut1_img_x * scale_x
+            split_mid_right = cut2_img_x * scale_x
+            
+        except Exception as e:
+            # במקרה נדיר של שגיאה בעיבוד התמונה, נחזור לחלוקה גיאומטרית רגילה
+            print(f"CV fallback: {e}")
+            split_left_mid = width / 3
+            split_mid_right = 2 * width / 3
 
-        # חיפוש קו החיתוך בין הטור השמאלי לאמצעי (מחפש באזור 28%-38% מרוחב הדף)
-        cut_left_center = find_best_cut(x_density, 0.28, 0.38)
-        # חיפוש קו החיתוך בין הטור האמצעי לימני (מחפש באזור 62%-72% מרוחב הדף)
-        cut_center_right = find_best_cut(x_density, 0.62, 0.72)
+        page_min_x = 0
+        page_max_x = width
 
-        # חישוב גבולות הדף הקיצוניים (כדי להיפטר משוליים לבנים מיותרים בקצוות)
-        all_valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-        if all_valid_words:
-            page_min_x = min([w[0] for w in all_valid_words])
-            page_max_x = max([w[2] for w in all_valid_words])
-        else:
-            page_min_x = 0
-            page_max_x = width
-
-        # הגדרת 3 הטורים לחיתוך לפי המרכזים הלבנים שמצאנו
-        right_col = fitz.Rect(cut_center_right, top_margin, page_max_x + 2, crop_height)
-        middle_col = fitz.Rect(cut_left_center, top_margin, cut_center_right, crop_height)
-        left_col = fitz.Rect(page_min_x - 2, top_margin, cut_left_center, crop_height)
+        # יצירת אזורי החיתוך כך שייפגשו בקו דק במרכז המרווח ללא שום חפיפה או דריסה
+        right_col = fitz.Rect(split_mid_right, top_margin, page_max_x, crop_height)
+        middle_col = fitz.Rect(split_left_mid, top_margin, split_mid_right, crop_height)
+        left_col = fitz.Rect(page_min_x, top_margin, split_left_mid, crop_height)
 
         columns = [right_col, middle_col, left_col]
 
