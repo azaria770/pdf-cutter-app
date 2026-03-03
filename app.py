@@ -259,36 +259,43 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 50
         crop_height = height - bottom_margin
 
-        # שולפים מילים כדי לבצע ניתוח מדויק יותר
         words = page.get_text("words")
         
-        # סינון מילים שמופיעות רק בחלק האמצעי של העמוד (כדי לא להיות מושפעים מתמונות וכותרות רחבות למעלה/למטה)
+        # שלב א': איתור קווי ההפרדה הכלליים לפי אזור בטוח במרכז העמוד
         mid_y_top = height * 0.3
         mid_y_bottom = height * 0.7
         mid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
         
-        # חלוקת המילים במרכז ל-3 קבוצות לפי מיקום אופקי משוער
-        left_words = [w for w in mid_words if (w[0]+w[2])/2 < width / 3]
-        center_words = [w for w in mid_words if width / 3 <= (w[0]+w[2])/2 < 2 * width / 3]
-        right_words = [w for w in mid_words if (w[0]+w[2])/2 >= 2 * width / 3]
+        left_words = [w for w in mid_words if (w[0]+w[2])/2 < width * 0.33]
+        center_words = [w for w in mid_words if width * 0.33 <= (w[0]+w[2])/2 < width * 0.66]
+        right_words = [w for w in mid_words if (w[0]+w[2])/2 >= width * 0.66]
         
-        # חישוב אמצע המרווח (ה-gap) האמיתי בין הטורים
-        if left_words and center_words:
-            max_left_x = max([w[2] for w in left_words])
-            min_center_x = min([w[0] for w in center_words])
-            split_left_mid = (max_left_x + min_center_x) / 2
-        else:
-            split_left_mid = width / 3
-            
-        if center_words and right_words:
-            max_center_x = max([w[2] for w in center_words])
-            min_right_x = min([w[0] for w in right_words])
-            split_mid_right = (max_center_x + min_right_x) / 2
-        else:
-            split_mid_right = 2 * width / 3
-            
-        # הגדרת הגבולות החיצוניים הקיצוניים של העמוד (ללא שוליים ריקים)
+        # חישוב אמצע המרווח הבסיסי
+        eff_left_max = max([w[2] for w in left_words]) if left_words else width / 3
+        eff_center_min = min([w[0] for w in center_words]) if center_words else width / 3
+        split_left_mid_base = (eff_left_max + eff_center_min) / 2
+        
+        eff_center_max = max([w[2] for w in center_words]) if center_words else 2 * width / 3
+        eff_right_min = min([w[0] for w in right_words]) if right_words else 2 * width / 3
+        split_mid_right_base = (eff_center_max + eff_right_min) / 2
+
+        # שלב ב': איסוף כל הטקסט החוקי בעמוד, וסיווגו לפי קווי ההפרדה הכלליים
         all_valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
+        
+        left_col_words = [w for w in all_valid_words if (w[0]+w[2])/2 < split_left_mid_base]
+        center_col_words = [w for w in all_valid_words if split_left_mid_base <= (w[0]+w[2])/2 < split_mid_right_base]
+        right_col_words = [w for w in all_valid_words if (w[0]+w[2])/2 >= split_mid_right_base]
+
+        # שלב ג': מציאת המילה החורגת ביותר (מקסימום מוחלט) בכל טור כדי להגן על טקסט אסימטרי
+        real_left_max_x = max([w[2] for w in left_col_words]) if left_col_words else split_left_mid_base
+        real_center_min_x = min([w[0] for w in center_col_words]) if center_col_words else split_left_mid_base
+        real_center_max_x = max([w[2] for w in center_col_words]) if center_col_words else split_mid_right_base
+        real_right_min_x = min([w[0] for w in right_col_words]) if right_col_words else split_mid_right_base
+
+        # שלב ד': חישוב קו החיתוך הסופי. אם שורה חרגה מאוד, נתאים את הקו אליה (בלי לדרוס את הטור הבא)
+        cut_left_center = real_left_max_x + 2 if real_left_max_x < real_center_min_x else (real_left_max_x + real_center_min_x) / 2
+        cut_center_right = real_center_max_x + 2 if real_center_max_x < real_right_min_x else (real_center_max_x + real_right_min_x) / 2
+
         if all_valid_words:
             page_min_x = min([w[0] for w in all_valid_words])
             page_max_x = max([w[2] for w in all_valid_words])
@@ -296,10 +303,10 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
             page_min_x = 0
             page_max_x = width
 
-        # יצירת מלבני החיתוך (Rect) על בסיס קווי ההפרדה שחישבנו
-        right_col = fitz.Rect(split_mid_right, top_margin, page_max_x, crop_height)
-        middle_col = fitz.Rect(split_left_mid, top_margin, split_mid_right, crop_height)
-        left_col = fitz.Rect(page_min_x, top_margin, split_left_mid, crop_height)
+        # יצירת מלבני החיתוך על בסיס הגבולות הדינמיים והבטוחים
+        right_col = fitz.Rect(cut_center_right, top_margin, page_max_x + 5, crop_height)
+        middle_col = fitz.Rect(cut_left_center, top_margin, cut_center_right, crop_height)
+        left_col = fitz.Rect(page_min_x - 5, top_margin, cut_left_center, crop_height)
 
         columns = [right_col, middle_col, left_col]
 
@@ -307,7 +314,6 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
 
         for col_idx, col_rect in enumerate(columns):
-            # מוודאים שהטור לא ריק (רוחב תקין) לפני יצירת עמוד
             if col_rect.width <= 0 or col_rect.height <= 0:
                 continue
                 
