@@ -147,12 +147,12 @@ def prepare_auto_pdf():
     original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
 
     if os.path.getsize(downloaded_path) < 100000:
-        os.remove(downloaded_path)
+        if os.path.exists(downloaded_path): os.remove(downloaded_path)
         return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.", None
 
     START_IMG, END_IMG = "start.png", "end.png"
     if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-        os.remove(downloaded_path)
+        if os.path.exists(downloaded_path): os.remove(downloaded_path)
         return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת.", None
 
     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
@@ -160,7 +160,7 @@ def prepare_auto_pdf():
 
     # --- עיבוד משולב: ייצור 4 הגרסאות של ה-PDF ---
     success = extract_pdf_by_images(downloaded_path, AUTO_REGULAR_PDF, start_b64, end_b64)
-    os.remove(downloaded_path)
+    if os.path.exists(downloaded_path): os.remove(downloaded_path)
 
     if success:
         convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
@@ -259,26 +259,39 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 50
         crop_height = height - bottom_margin
 
+        # שליפת המילים לצורך איתור מדויק של המרווחים
         words = page.get_text("words")
         
-        # שלב א': איתור קווי ההפרדה הכלליים לפי אזור בטוח במרכז העמוד
+        # התמקדות רק בטקסט שבמרכז העמוד כדי לא להיות מושפעים מכותרות רחבות ותמונות
         mid_y_top = height * 0.3
         mid_y_bottom = height * 0.7
         mid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
         
+        # חלוקה גסה של המילים לפי מיקומן האופקי
         left_words = [w for w in mid_words if (w[0]+w[2])/2 < width * 0.33]
         center_words = [w for w in mid_words if width * 0.33 <= (w[0]+w[2])/2 < width * 0.66]
         right_words = [w for w in mid_words if (w[0]+w[2])/2 >= width * 0.66]
         
-        # חישוב אמצע המרווח הבסיסי
-        eff_left_max = max([w[2] for w in left_words]) if left_words else width / 3
-        eff_center_min = min([w[0] for w in center_words]) if center_words else width / 3
-        split_left_mid_base = (eff_left_max + eff_center_min) / 2
-        
-        eff_center_max = max([w[2] for w in center_words]) if center_words else 2 * width / 3
-        eff_right_min = min([w[0] for w in right_words]) if right_words else 2 * width / 3
-        split_mid_right_base = (eff_center_max + eff_right_min) / 2
-
+        # מציאת קו האמצע של המרווח (השטח הריק) בין הטורים
+        # שימוש באחוזונים (2% ו-98%) מנטרל "רעשים" וטקסט שחורג בטעות
+        if left_words and center_words:
+            left_x1s = sorted([w[2] for w in left_words])
+            center_x0s = sorted([w[0] for w in center_words])
+            eff_left_max = left_x1s[int(len(left_x1s) * 0.98)] if left_x1s else width / 3
+            eff_center_min = center_x0s[int(len(center_x0s) * 0.02)] if center_x0s else width / 3
+            split_left_mid_base = (eff_left_max + eff_center_min) / 2
+        else:
+            split_left_mid_base = width / 3
+            
+        if center_words and right_words:
+            center_x1s = sorted([w[2] for w in center_words])
+            right_x0s = sorted([w[0] for w in right_words])
+            eff_center_max = center_x1s[int(len(center_x1s) * 0.98)] if center_x1s else 2 * width / 3
+            eff_right_min = right_x0s[int(len(right_x0s) * 0.02)] if right_x0s else 2 * width / 3
+            split_mid_right_base = (eff_center_max + eff_right_min) / 2
+        else:
+            split_mid_right_base = 2 * width / 3
+            
         # שלב ב': איסוף כל הטקסט החוקי בעמוד, וסיווגו לפי קווי ההפרדה הכלליים
         all_valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
         
@@ -566,7 +579,7 @@ def main():
                                 st.success("העיבוד בוצע בהצלחה!")
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
-                            os.remove(downloaded_path)
+                            if os.path.exists(downloaded_path): os.remove(downloaded_path)
                         else:
                             st.error("לא הצלחנו להוריד את הקובץ מהלינק שסופק.")
                 
