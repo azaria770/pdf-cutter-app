@@ -155,11 +155,16 @@ def prepare_auto_pdf():
     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
 
-    success = extract_pdf_by_images(downloaded_path, AUTO_CUT_PDF, start_b64, end_b64)
+    # --- עיבוד משולב: חיתוך לפי תמונות ולאחר מכן חלוקה לטורים ---
+    temp_extracted = "temp_auto_extracted.pdf"
+    success = extract_pdf_by_images(downloaded_path, temp_extracted, start_b64, end_b64)
     os.remove(downloaded_path)
 
     if success:
+        split_pdf_to_columns(temp_extracted, AUTO_CUT_PDF)
         convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
+        if os.path.exists(temp_extracted):
+            os.remove(temp_extracted)
         
         if found_new or last_title != original_filename:
             save_config({
@@ -170,9 +175,95 @@ def prepare_auto_pdf():
             })
         return True, None, original_filename
     else:
+        if os.path.exists(temp_extracted):
+            os.remove(temp_extracted)
         return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש.", None
 
-# --- פונקציות לוגיקת החיתוך והמרה לשחור-לבן ---
+# --- פונקציות תצוגה, חלוקה לטורים, לוגיקת החיתוך והמרה לשחור-לבן ---
+
+def display_pdf(file_path):
+    """מציג את ה-PDF ישירות בתוך ממשק האתר"""
+    with open(file_path, "rb") as f:
+        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf" style="border: 1px solid #ccc; border-radius: 8px;"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
+
+def split_pdf_to_columns(input_pdf_path, output_pdf_path):
+    doc = fitz.open(input_pdf_path)
+    out_doc = fitz.open()
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        rect = page.rect
+        width = rect.width
+        height = rect.height
+
+        top_margin = 50
+        bottom_margin = 50
+        crop_height = height - bottom_margin
+
+        blocks = page.get_text("blocks")
+        
+        col_blocks = [b for b in blocks if b[6] == 0 and (b[2] - b[0]) < width * 0.4]
+        
+        left_x0, left_x1 = width, 0
+        mid_x0, mid_x1 = width, 0
+        right_x0, right_x1 = width, 0
+        
+        for b in col_blocks:
+            cx = (b[0] + b[2]) / 2
+            if cx < width / 3: 
+                left_x0, left_x1 = min(left_x0, b[0]), max(left_x1, b[2])
+            elif cx < 2 * width / 3: 
+                mid_x0, mid_x1 = min(mid_x0, b[0]), max(mid_x1, b[2])
+            else: 
+                right_x0, right_x1 = min(right_x0, b[0]), max(right_x1, b[2])
+        
+        pad = 5
+        
+        right_col = fitz.Rect(right_x0 - pad, top_margin, right_x1 + pad, crop_height)
+        middle_col = fitz.Rect(mid_x0 - pad, top_margin, mid_x1 + pad, crop_height)
+        left_col = fitz.Rect(left_x0 - pad, top_margin, left_x1 + pad, crop_height)
+
+        columns = [right_col, middle_col, left_col]
+
+        page_dict = page.get_text("dict")
+        images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
+
+        for col_idx, col_rect in enumerate(columns):
+            new_page = out_doc.new_page(width=col_rect.width, height=col_rect.height)
+            new_page.show_pdf_page(new_page.rect, doc, page_num, clip=col_rect)
+
+            for img in images:
+                img_bbox = fitz.Rect(img["bbox"])
+                intersections = [img_bbox.intersect(c).get_area() for c in columns]
+                max_area = max(intersections)
+                
+                if max_area == 0:
+                    continue 
+                
+                assigned_col_idx = intersections.index(max_area)
+                shifted_bbox = fitz.Rect(
+                    img_bbox.x0 - col_rect.x0, 
+                    img_bbox.y0 - col_rect.y0, 
+                    img_bbox.x1 - col_rect.x0, 
+                    img_bbox.y1 - col_rect.y0
+                )
+                
+                if col_idx != assigned_col_idx:
+                    new_page.draw_rect(shifted_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+                else:
+                    new_page.draw_rect(shifted_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+                    img_bytes = img.get("image")
+                    if img_bytes and img_bbox.width > 0:
+                        scale = col_rect.width / img_bbox.width
+                        new_height = img_bbox.height * scale
+                        target_rect = fitz.Rect(0, shifted_bbox.y0, col_rect.width, shifted_bbox.y0 + new_height)
+                        new_page.insert_image(target_rect, stream=img_bytes)
+
+    out_doc.save(output_pdf_path)
+    out_doc.close()
+    doc.close()
 
 def convert_pdf_to_bw(input_path, output_path):
     """ממיר קובץ PDF לגרסת שחור-לבן איכותית ווקטורית באמצעות המנוע של Ghostscript"""
@@ -290,6 +381,17 @@ def main():
                         mime="application/pdf",
                         use_container_width=True
                     )
+
+            # --- כפתורי תצוגה ---
+            view_col1, view_col2 = st.columns(2)
+            view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_auto")
+            view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_auto")
+
+            if view_color:
+                display_pdf(AUTO_CUT_PDF)
+            elif view_bw and os.path.exists(AUTO_CUT_BW_PDF):
+                display_pdf(AUTO_CUT_BW_PDF)
+
         else:
             st.error(error_msg)
 
@@ -307,7 +409,7 @@ def main():
                 st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
                 return
 
-            with st.spinner("מבצע משיכה וחיתוך..."):
+            with st.spinner("מבצע משיכה, חיתוך וחלוקה לטורים..."):
                 try:
                     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
                     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
@@ -322,12 +424,17 @@ def main():
                             tmp.write(uploaded_file.getvalue())
                             input_path = tmp.name
                         
+                        temp_extracted = input_path.replace(".pdf", "_extracted.pdf")
                         output_path = input_path.replace(".pdf", "_fixed.pdf")
                         output_bw_path = input_path.replace(".pdf", "_fixed_bw.pdf")
                         
-                        if extract_pdf_by_images(input_path, output_path, start_b64, end_b64):
+                        if extract_pdf_by_images(input_path, temp_extracted, start_b64, end_b64):
+                            split_pdf_to_columns(temp_extracted, output_path)
                             convert_pdf_to_bw(output_path, output_bw_path) 
-                            st.success("החיתוך בוצע בהצלחה!")
+                            if os.path.exists(temp_extracted):
+                                os.remove(temp_extracted)
+
+                            st.success("העיבוד בוצע בהצלחה!")
                             
                             safe_manual_name = uploaded_file.name
                             if not safe_manual_name.lower().endswith('.pdf'):
@@ -343,6 +450,17 @@ def main():
                                 col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
                             with open(output_bw_path, "rb") as f_bw:
                                 col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
+                            
+                            # --- כפתורי תצוגה ---
+                            view_col1, view_col2 = st.columns(2)
+                            view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_manual_up")
+                            view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_manual_up")
+
+                            if view_color:
+                                display_pdf(output_path)
+                            elif view_bw and os.path.exists(output_bw_path):
+                                display_pdf(output_bw_path)
+
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                     
@@ -372,12 +490,17 @@ def main():
                             safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
                             display_manual_title = safe_manual_name.replace(".pdf", "")
                             
+                            temp_extracted = "temp_extracted_drive.pdf"
                             output_path = "temp_fixed.pdf"
                             output_bw_path = "temp_fixed_bw.pdf"
                             
-                            if extract_pdf_by_images(downloaded_path, output_path, start_b64, end_b64):
+                            if extract_pdf_by_images(downloaded_path, temp_extracted, start_b64, end_b64):
+                                split_pdf_to_columns(temp_extracted, output_path)
                                 convert_pdf_to_bw(output_path, output_bw_path) 
-                                st.success("החיתוך בוצע בהצלחה!")
+                                if os.path.exists(temp_extracted):
+                                    os.remove(temp_extracted)
+
+                                st.success("העיבוד בוצע בהצלחה!")
                                 
                                 st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
                                 col1, col2 = st.columns(2)
@@ -386,6 +509,17 @@ def main():
                                     col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
                                 with open(output_bw_path, "rb") as f_bw:
                                     col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
+
+                                # --- כפתורי תצוגה ---
+                                view_col1, view_col2 = st.columns(2)
+                                view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_manual_drive")
+                                view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_manual_drive")
+
+                                if view_color:
+                                    display_pdf(output_path)
+                                elif view_bw and os.path.exists(output_bw_path):
+                                    display_pdf(output_bw_path)
+
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
