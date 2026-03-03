@@ -17,6 +17,8 @@ import subprocess  # <--- הוספנו כדי להפעיל את Ghostscript
 
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
+AUTO_REGULAR_PDF = "auto_regular_document.pdf"
+AUTO_REGULAR_BW_PDF = "auto_regular_document_bw.pdf" 
 AUTO_CUT_PDF = "auto_cut_document.pdf"
 AUTO_CUT_BW_PDF = "auto_cut_document_bw.pdf" 
 
@@ -118,9 +120,10 @@ def prepare_auto_pdf():
                                     break
 
     # החזרת הקובץ המוכן אם כבר נחתך ואין חדש באופק
-    if not found_new and os.path.exists(AUTO_CUT_PDF):
-        if not os.path.exists(AUTO_CUT_BW_PDF):
-            convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
+    if not found_new and os.path.exists(AUTO_REGULAR_PDF):
+        if not os.path.exists(AUTO_REGULAR_BW_PDF): convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
+        if not os.path.exists(AUTO_CUT_PDF): split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
+        if not os.path.exists(AUTO_CUT_BW_PDF): convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         return True, None, last_title
 
     if not target_drive_id:
@@ -155,16 +158,14 @@ def prepare_auto_pdf():
     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
 
-    # --- עיבוד משולב: חיתוך לפי תמונות ולאחר מכן חלוקה לטורים ---
-    temp_extracted = "temp_auto_extracted.pdf"
-    success = extract_pdf_by_images(downloaded_path, temp_extracted, start_b64, end_b64)
+    # --- עיבוד משולב: ייצור 4 הגרסאות של ה-PDF ---
+    success = extract_pdf_by_images(downloaded_path, AUTO_REGULAR_PDF, start_b64, end_b64)
     os.remove(downloaded_path)
 
     if success:
-        split_pdf_to_columns(temp_extracted, AUTO_CUT_PDF)
+        convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
+        split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
         convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
-        if os.path.exists(temp_extracted):
-            os.remove(temp_extracted)
         
         if found_new or last_title != original_filename:
             save_config({
@@ -175,11 +176,9 @@ def prepare_auto_pdf():
             })
         return True, None, original_filename
     else:
-        if os.path.exists(temp_extracted):
-            os.remove(temp_extracted)
         return False, "לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך ה-PDF החדש.", None
 
-# --- פונקציות תצוגה, חלוקה לטורים, לוגיקת החיתוך והמרה לשחור-לבן ---
+# --- פונקציות עיבוד תצוגה וממשק מתקדם ---
 
 def display_pdf(file_path):
     """מציג את ה-PDF ישירות בתוך ממשק האתר"""
@@ -187,6 +186,65 @@ def display_pdf(file_path):
         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
     pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf" style="border: 1px solid #ccc; border-radius: 8px;"></iframe>'
     st.markdown(pdf_display, unsafe_allow_html=True)
+
+def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color, cut_bw, key_prefix):
+    """מנהל את התפריט ההיררכי לבחירת פורמט, פריסה ופעולה רצויה"""
+    
+    # אתחול משתני מצב
+    if f"{key_prefix}_format" not in st.session_state:
+        st.session_state[f"{key_prefix}_format"] = None
+    if f"{key_prefix}_layout" not in st.session_state:
+        st.session_state[f"{key_prefix}_layout"] = None
+
+    st.write("### 1. בחר פורמט צבע:")
+    col1, col2 = st.columns(2)
+    
+    if col1.button("🎨 צבעוני", use_container_width=True, key=f"{key_prefix}_btn_color"):
+        st.session_state[f"{key_prefix}_format"] = "color"
+        st.session_state[f"{key_prefix}_layout"] = None
+    
+    if col2.button("🖨️ שחור לבן", use_container_width=True, key=f"{key_prefix}_btn_bw"):
+        st.session_state[f"{key_prefix}_format"] = "bw"
+        st.session_state[f"{key_prefix}_layout"] = None
+
+    fmt = st.session_state[f"{key_prefix}_format"]
+    
+    if fmt:
+        st.write("### 2. בחר פריסה:")
+        layout_col1, layout_col2 = st.columns(2)
+        
+        if layout_col1.button("📄 מסמך רגיל", use_container_width=True, key=f"{key_prefix}_btn_reg"):
+            st.session_state[f"{key_prefix}_layout"] = "regular"
+        
+        if layout_col2.button("✂️ חתוך לטורים (לקריאה דיגיטלית)", use_container_width=True, key=f"{key_prefix}_btn_cut"):
+            st.session_state[f"{key_prefix}_layout"] = "cut"
+
+        lyt = st.session_state[f"{key_prefix}_layout"]
+        if lyt:
+            # הגדרת הקובץ ושם ההורדה בהתאם לבחירות
+            if fmt == "color" and lyt == "regular":
+                target_file = regular_color
+                dl_name = base_filename
+            elif fmt == "bw" and lyt == "regular":
+                target_file = regular_bw
+                dl_name = base_filename.replace(".pdf", " - שחור לבן.pdf")
+            elif fmt == "color" and lyt == "cut":
+                target_file = cut_color
+                dl_name = base_filename.replace(".pdf", " - חתוך לטורים.pdf")
+            elif fmt == "bw" and lyt == "cut":
+                target_file = cut_bw
+                dl_name = base_filename.replace(".pdf", " - שחור לבן - חתוך לטורים.pdf")
+
+            if os.path.exists(target_file):
+                st.write("### 3. בחר פעולה:")
+                act_col1, act_col2 = st.columns(2)
+                with open(target_file, "rb") as f:
+                    act_col1.download_button("📥 הורד קובץ", f, dl_name, "application/pdf", use_container_width=True, key=f"{key_prefix}_btn_dl")
+                if act_col2.button("👁️ תצוגה באתר", use_container_width=True, key=f"{key_prefix}_btn_view"):
+                    display_pdf(target_file)
+            else:
+                st.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
+
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     doc = fitz.open(input_pdf_path)
@@ -280,11 +338,8 @@ def convert_pdf_to_bw(input_path, output_path):
         input_path
     ]
     try:
-        # הפעלת מנוע המערכת ברקע
         subprocess.run(gs_cmd, check=True)
     except Exception as e:
-        # במקרה שבו Ghostscript נכשל (למשל, שכחת ליצור את קובץ ה-packages.txt),
-        # נייצר עותק צבעוני רגיל כדי שהאתר לא יקרוס
         import shutil
         shutil.copy(input_path, output_path)
         print(f"Ghostscript error: {e}")
@@ -338,10 +393,19 @@ def main():
     
     st.markdown('<h1 style="text-align: center;">סיכום פרשת שבוע מגיליון "משכן שילה"</h1>', unsafe_allow_html=True)
     
+    # ניקוי state במעבר בין אפשרויות כדי שלא יציג קבצים ישנים
+    if "prev_upload_option" not in st.session_state:
+        st.session_state.prev_upload_option = None
+
     upload_option = st.radio("איך תרצה לטעון את ה-PDF?", 
                              ("שליפה אוטומטית (משכן שילה)", 
                               "העלאת קובץ מהמחשב", 
                               "קישור מ-Google Drive"))
+    
+    if st.session_state.prev_upload_option != upload_option:
+        st.session_state.prev_upload_option = upload_option
+        if "manual_files" in st.session_state:
+            del st.session_state["manual_files"]
     
     START_IMG, END_IMG = "start.png", "end.png"
 
@@ -349,48 +413,25 @@ def main():
         with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
             success, error_msg, target_title = prepare_auto_pdf()
         
-        if success and os.path.exists(AUTO_CUT_PDF):
+        if success and os.path.exists(AUTO_REGULAR_PDF):
             st.success("✅ הקובץ מוכן עבורך!")
             
             safe_filename = re.sub(r'[\\/*?:"<>|]', "", target_title).strip()
             if not safe_filename.lower().endswith('.pdf'):
                 safe_filename += ".pdf"
             
-            safe_filename_bw = safe_filename.replace(".pdf", " - שחור לבן.pdf")
             display_title = safe_filename.replace(".pdf", "")
+            st.markdown(f'<h3 style="text-align: right; direction: rtl;">ניהול מסמך מ-"{display_title}"</h3>', unsafe_allow_html=True)
             
-            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_title}"</h3>', unsafe_allow_html=True)
-            
-            col1, col2 = st.columns(2)
-            
-            with open(AUTO_CUT_PDF, "rb") as f_color:
-                col1.download_button(
-                    label="📥 פורמט צבעוני", 
-                    data=f_color, 
-                    file_name=safe_filename, 
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-                
-            if os.path.exists(AUTO_CUT_BW_PDF):
-                with open(AUTO_CUT_BW_PDF, "rb") as f_bw:
-                    col2.download_button(
-                        label="🖨️ פורמט שחור לבן", 
-                        data=f_bw, 
-                        file_name=safe_filename_bw, 
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-
-            # --- כפתורי תצוגה ---
-            view_col1, view_col2 = st.columns(2)
-            view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_auto")
-            view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_auto")
-
-            if view_color:
-                display_pdf(AUTO_CUT_PDF)
-            elif view_bw and os.path.exists(AUTO_CUT_BW_PDF):
-                display_pdf(AUTO_CUT_BW_PDF)
+            # קריאה לפונקציית ה-UI ההיררכית
+            render_download_view_ui(
+                base_filename=safe_filename,
+                regular_color=AUTO_REGULAR_PDF,
+                regular_bw=AUTO_REGULAR_BW_PDF,
+                cut_color=AUTO_CUT_PDF,
+                cut_bw=AUTO_CUT_BW_PDF,
+                key_prefix="auto"
+            )
 
         else:
             st.error(error_msg)
@@ -404,12 +445,12 @@ def main():
         elif upload_option == "קישור מ-Google Drive":
             manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
             
-        if st.button("הפעל חיתוך ידני"):
+        if st.button("הפעל חיתוך ועיבוד ידני"):
             if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
                 st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
                 return
 
-            with st.spinner("מבצע משיכה, חיתוך וחלוקה לטורים..."):
+            with st.spinner("מבצע משיכה, חיתוך והכנת הטורים..."):
                 try:
                     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
                     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
@@ -424,43 +465,29 @@ def main():
                             tmp.write(uploaded_file.getvalue())
                             input_path = tmp.name
                         
-                        temp_extracted = input_path.replace(".pdf", "_extracted.pdf")
-                        output_path = input_path.replace(".pdf", "_fixed.pdf")
-                        output_bw_path = input_path.replace(".pdf", "_fixed_bw.pdf")
+                        output_regular = input_path.replace(".pdf", "_regular.pdf")
+                        output_regular_bw = input_path.replace(".pdf", "_regular_bw.pdf")
+                        output_cut = input_path.replace(".pdf", "_cut.pdf")
+                        output_cut_bw = input_path.replace(".pdf", "_cut_bw.pdf")
                         
-                        if extract_pdf_by_images(input_path, temp_extracted, start_b64, end_b64):
-                            split_pdf_to_columns(temp_extracted, output_path)
-                            convert_pdf_to_bw(output_path, output_bw_path) 
-                            if os.path.exists(temp_extracted):
-                                os.remove(temp_extracted)
-
-                            st.success("העיבוד בוצע בהצלחה!")
+                        if extract_pdf_by_images(input_path, output_regular, start_b64, end_b64):
+                            convert_pdf_to_bw(output_regular, output_regular_bw)
+                            split_pdf_to_columns(output_regular, output_cut)
+                            convert_pdf_to_bw(output_cut, output_cut_bw)
                             
                             safe_manual_name = uploaded_file.name
                             if not safe_manual_name.lower().endswith('.pdf'):
                                 safe_manual_name += ".pdf"
                             safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
-                            safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
-                            display_manual_title = safe_manual_name.replace(".pdf", "")
                             
-                            st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
-                            col1, col2 = st.columns(2)
-                                
-                            with open(output_path, "rb") as f_color:
-                                col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
-                            with open(output_bw_path, "rb") as f_bw:
-                                col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
-                            
-                            # --- כפתורי תצוגה ---
-                            view_col1, view_col2 = st.columns(2)
-                            view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_manual_up")
-                            view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_manual_up")
-
-                            if view_color:
-                                display_pdf(output_path)
-                            elif view_bw and os.path.exists(output_bw_path):
-                                display_pdf(output_bw_path)
-
+                            st.session_state["manual_files"] = {
+                                "reg_col": output_regular,
+                                "reg_bw": output_regular_bw,
+                                "cut_col": output_cut,
+                                "cut_bw": output_cut_bw,
+                                "base_name": safe_manual_name
+                            }
+                            st.success("העיבוד בוצע בהצלחה!")
                         else:
                             st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                     
@@ -486,40 +513,25 @@ def main():
                                 safe_manual_name = safe_manual_name.replace(".pdf", "_fixed.pdf")
                             else:
                                 safe_manual_name += "_fixed.pdf"
+                            
+                            output_regular = "temp_regular_drive.pdf"
+                            output_regular_bw = "temp_regular_bw_drive.pdf"
+                            output_cut = "temp_cut_drive.pdf"
+                            output_cut_bw = "temp_cut_bw_drive.pdf"
+                            
+                            if extract_pdf_by_images(downloaded_path, output_regular, start_b64, end_b64):
+                                convert_pdf_to_bw(output_regular, output_regular_bw)
+                                split_pdf_to_columns(output_regular, output_cut)
+                                convert_pdf_to_bw(output_cut, output_cut_bw)
                                 
-                            safe_manual_name_bw = safe_manual_name.replace(".pdf", " - שחור לבן.pdf")
-                            display_manual_title = safe_manual_name.replace(".pdf", "")
-                            
-                            temp_extracted = "temp_extracted_drive.pdf"
-                            output_path = "temp_fixed.pdf"
-                            output_bw_path = "temp_fixed_bw.pdf"
-                            
-                            if extract_pdf_by_images(downloaded_path, temp_extracted, start_b64, end_b64):
-                                split_pdf_to_columns(temp_extracted, output_path)
-                                convert_pdf_to_bw(output_path, output_bw_path) 
-                                if os.path.exists(temp_extracted):
-                                    os.remove(temp_extracted)
-
+                                st.session_state["manual_files"] = {
+                                    "reg_col": output_regular,
+                                    "reg_bw": output_regular_bw,
+                                    "cut_col": output_cut,
+                                    "cut_bw": output_cut_bw,
+                                    "base_name": safe_manual_name
+                                }
                                 st.success("העיבוד בוצע בהצלחה!")
-                                
-                                st.markdown(f'<h3 style="text-align: right; direction: rtl;">להורדת סיכום פרשת השבוע מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
-                                col1, col2 = st.columns(2)
-                                
-                                with open(output_path, "rb") as f_color:
-                                    col1.download_button("📥 פורמט צבעוני", f_color, safe_manual_name, "application/pdf", use_container_width=True)
-                                with open(output_bw_path, "rb") as f_bw:
-                                    col2.download_button("🖨️ פורמט שחור לבן", f_bw, safe_manual_name_bw, "application/pdf", use_container_width=True)
-
-                                # --- כפתורי תצוגה ---
-                                view_col1, view_col2 = st.columns(2)
-                                view_color = view_col1.button("👁️ תצוגת קריאה צבעונית", use_container_width=True, key="view_color_manual_drive")
-                                view_bw = view_col2.button("👁️ תצוגת קריאה שחור לבן", use_container_width=True, key="view_bw_manual_drive")
-
-                                if view_color:
-                                    display_pdf(output_path)
-                                elif view_bw and os.path.exists(output_bw_path):
-                                    display_pdf(output_bw_path)
-
                             else:
                                 st.error("לא הצלחנו למצוא את סימני ההתחלה והסיום בתוך הקובץ.")
                             os.remove(downloaded_path)
@@ -528,6 +540,21 @@ def main():
                 
                 except Exception as e:
                     st.error(f"אירעה שגיאה: {e}")
+
+        # אם העיבוד צלח, נציג את הממשק גם אם Streamlit ריענן את העמוד בעקבות לחיצה על כפתורי ה-UI הפנימיים
+        if "manual_files" in st.session_state:
+            f = st.session_state["manual_files"]
+            display_manual_title = f["base_name"].replace(".pdf", "")
+            st.markdown(f'<h3 style="text-align: right; direction: rtl;">ניהול מסמך מ-"{display_manual_title}"</h3>', unsafe_allow_html=True)
+            
+            render_download_view_ui(
+                base_filename=f["base_name"],
+                regular_color=f["reg_col"],
+                regular_bw=f["reg_bw"],
+                cut_color=f["cut_col"],
+                cut_bw=f["cut_bw"],
+                key_prefix="manual"
+            )
 
 if __name__ == "__main__":
     main()
