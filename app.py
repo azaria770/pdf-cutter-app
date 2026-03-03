@@ -190,7 +190,6 @@ def display_pdf(file_path):
 def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color, cut_bw, key_prefix):
     """מנהל את התפריט ההיררכי לבחירת פורמט, פריסה ופעולה רצויה"""
     
-    # אתחול משתני מצב
     if f"{key_prefix}_format" not in st.session_state:
         st.session_state[f"{key_prefix}_format"] = None
     if f"{key_prefix}_layout" not in st.session_state:
@@ -221,7 +220,6 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
         lyt = st.session_state[f"{key_prefix}_layout"]
         if lyt:
-            # הגדרת הקובץ ושם ההורדה בהתאם לבחירות
             if fmt == "color" and lyt == "regular":
                 target_file = regular_color
                 dl_name = base_filename
@@ -259,56 +257,46 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 50
         crop_height = height - bottom_margin
 
-        # שליפת המילים לצורך איתור מדויק של המרווחים
         words = page.get_text("words")
         
         # התמקדות רק בטקסט שבמרכז העמוד כדי לא להיות מושפעים מכותרות רחבות ותמונות
-        mid_y_top = height * 0.3
-        mid_y_bottom = height * 0.7
+        mid_y_top = height * 0.25
+        mid_y_bottom = height * 0.75
         mid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
         
-        # חלוקה גסה של המילים לפי מיקומן האופקי
-        left_words = [w for w in mid_words if (w[0]+w[2])/2 < width * 0.33]
-        center_words = [w for w in mid_words if width * 0.33 <= (w[0]+w[2])/2 < width * 0.66]
-        right_words = [w for w in mid_words if (w[0]+w[2])/2 >= width * 0.66]
+        # --- אלגוריתם חיתוך מבוסס מפת צפיפות (Histogram) ---
+        # יוצרים מערך שמייצג כל פיקסל לרוחב העמוד
+        width_int = int(width)
+        x_density = np.zeros(width_int)
         
-        # מציאת קו האמצע של המרווח (השטח הריק) בין הטורים
-        # שימוש באחוזונים (2% ו-98%) מנטרל "רעשים" וטקסט שחורג בטעות
-        if left_words and center_words:
-            left_x1s = sorted([w[2] for w in left_words])
-            center_x0s = sorted([w[0] for w in center_words])
-            eff_left_max = left_x1s[int(len(left_x1s) * 0.98)] if left_x1s else width / 3
-            eff_center_min = center_x0s[int(len(center_x0s) * 0.02)] if center_x0s else width / 3
-            split_left_mid_base = (eff_left_max + eff_center_min) / 2
-        else:
-            split_left_mid_base = width / 3
+        # מוסיפים 'משקל' לכל פיקסל שמופיע בו טקסט
+        for w in mid_words:
+            x0, x1 = int(max(0, w[0])), int(min(width_int - 1, w[2]))
+            x_density[x0:x1+1] += 1
             
-        if center_words and right_words:
-            center_x1s = sorted([w[2] for w in center_words])
-            right_x0s = sorted([w[0] for w in right_words])
-            eff_center_max = center_x1s[int(len(center_x1s) * 0.98)] if center_x1s else 2 * width / 3
-            eff_right_min = right_x0s[int(len(right_x0s) * 0.02)] if right_x0s else 2 * width / 3
-            split_mid_right_base = (eff_center_max + eff_right_min) / 2
-        else:
-            split_mid_right_base = 2 * width / 3
+        def find_best_cut(density, start_pct, end_pct):
+            """מוצא את אמצע 'העמק הלבן' ביותר באזור הצפוי של המרווח"""
+            start_idx = int(width * start_pct)
+            end_idx = int(width * end_pct)
+            sub_array = density[start_idx:end_idx]
             
-        # שלב ב': איסוף כל הטקסט החוקי בעמוד, וסיווגו לפי קווי ההפרדה הכלליים
+            if len(sub_array) == 0:
+                return (start_idx + end_idx) / 2
+                
+            min_val = np.min(sub_array)
+            # מאתרים את כל הפיקסלים שבהם צפיפות הטקסט היא מינימלית (השטח הריק)
+            min_indices = np.where(sub_array == min_val)[0]
+            # לוקחים את האמצע המדויק של השטח הריק הזה
+            best_local_x = int(np.median(min_indices))
+            return start_idx + best_local_x
+
+        # חיפוש קו החיתוך בין הטור השמאלי לאמצעי (מחפש באזור 28%-38% מרוחב הדף)
+        cut_left_center = find_best_cut(x_density, 0.28, 0.38)
+        # חיפוש קו החיתוך בין הטור האמצעי לימני (מחפש באזור 62%-72% מרוחב הדף)
+        cut_center_right = find_best_cut(x_density, 0.62, 0.72)
+
+        # חישוב גבולות הדף הקיצוניים (כדי להיפטר משוליים לבנים מיותרים בקצוות)
         all_valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-        
-        left_col_words = [w for w in all_valid_words if (w[0]+w[2])/2 < split_left_mid_base]
-        center_col_words = [w for w in all_valid_words if split_left_mid_base <= (w[0]+w[2])/2 < split_mid_right_base]
-        right_col_words = [w for w in all_valid_words if (w[0]+w[2])/2 >= split_mid_right_base]
-
-        # שלב ג': מציאת המילה החורגת ביותר (מקסימום מוחלט) בכל טור כדי להגן על טקסט אסימטרי
-        real_left_max_x = max([w[2] for w in left_col_words]) if left_col_words else split_left_mid_base
-        real_center_min_x = min([w[0] for w in center_col_words]) if center_col_words else split_left_mid_base
-        real_center_max_x = max([w[2] for w in center_col_words]) if center_col_words else split_mid_right_base
-        real_right_min_x = min([w[0] for w in right_col_words]) if right_col_words else split_mid_right_base
-
-        # שלב ד': חישוב קו החיתוך הסופי. אם שורה חרגה מאוד, נתאים את הקו אליה (בלי לדרוס את הטור הבא)
-        cut_left_center = real_left_max_x + 2 if real_left_max_x < real_center_min_x else (real_left_max_x + real_center_min_x) / 2
-        cut_center_right = real_center_max_x + 2 if real_center_max_x < real_right_min_x else (real_center_max_x + real_right_min_x) / 2
-
         if all_valid_words:
             page_min_x = min([w[0] for w in all_valid_words])
             page_max_x = max([w[2] for w in all_valid_words])
@@ -316,10 +304,10 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
             page_min_x = 0
             page_max_x = width
 
-        # יצירת מלבני החיתוך על בסיס הגבולות הדינמיים והבטוחים
-        right_col = fitz.Rect(cut_center_right, top_margin, page_max_x + 5, crop_height)
+        # הגדרת 3 הטורים לחיתוך לפי המרכזים הלבנים שמצאנו
+        right_col = fitz.Rect(cut_center_right, top_margin, page_max_x + 2, crop_height)
         middle_col = fitz.Rect(cut_left_center, top_margin, cut_center_right, crop_height)
-        left_col = fitz.Rect(page_min_x - 5, top_margin, cut_left_center, crop_height)
+        left_col = fitz.Rect(page_min_x - 2, top_margin, cut_left_center, crop_height)
 
         columns = [right_col, middle_col, left_col]
 
@@ -438,7 +426,6 @@ def main():
     
     st.markdown('<h1 style="text-align: center;">סיכום פרשת שבוע מגיליון "משכן שילה"</h1>', unsafe_allow_html=True)
     
-    # ניקוי state במעבר בין אפשרויות כדי שלא יציג קבצים ישנים
     if "prev_upload_option" not in st.session_state:
         st.session_state.prev_upload_option = None
 
@@ -468,7 +455,6 @@ def main():
             display_title = safe_filename.replace(".pdf", "")
             st.markdown(f'<h3 style="text-align: right; direction: rtl;">ניהול מסמך מ-"{display_title}"</h3>', unsafe_allow_html=True)
             
-            # קריאה לפונקציית ה-UI ההיררכית
             render_download_view_ui(
                 base_filename=safe_filename,
                 regular_color=AUTO_REGULAR_PDF,
@@ -586,7 +572,6 @@ def main():
                 except Exception as e:
                     st.error(f"אירעה שגיאה: {e}")
 
-        # אם העיבוד צלח, נציג את הממשק גם אם Streamlit ריענן את העמוד בעקבות לחיצה על כפתורי ה-UI הפנימיים
         if "manual_files" in st.session_state:
             f = st.session_state["manual_files"]
             display_manual_title = f["base_name"].replace(".pdf", "")
