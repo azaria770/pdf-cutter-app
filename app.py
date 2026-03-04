@@ -237,8 +237,8 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     """
-    מפצל PDF ל-3 טורים באמצעות "שיוך קרובים" (KNN) והסתרת טיפקס (Redaction).
-    עוקף לחלוטין את בעיית הזיגזג והטקסט שעוטף תמונות.
+    מפצל PDF ל-3 טורים באמצעות זיהוי קופסאות (Blocks) ומחיקה אקטיבית (טיפקס).
+    עוקף את בעיית הטקסט המתעקל (זיגזג) שעוטף תמונות.
     """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
@@ -248,115 +248,89 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         width = page.rect.width
         height = page.rect.height
 
-        top_margin = 50
-        bottom_margin = 50
-        crop_height = height - bottom_margin
+        # חילוץ כל הבלוקים (טקסט ותמונות) בעמוד
+        page_dict = page.get_text("dict")
+        blocks = page_dict.get("blocks", [])
 
-        # 1. חילוץ כל המילים החוקיות בעמוד
-        words = page.get_text("words")
-        valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-
-        if not valid_words:
+        if not blocks:
             continue
 
-        # 2. מציאת 'מרכזי הכובד' של שלושת הטורים (Anchors)
-        cxs = [(w[0] + w[2]) / 2 for w in valid_words]
-        
-        left_cxs = [cx for cx in cxs if cx < width * 0.33]
-        center_cxs = [cx for cx in cxs if width * 0.33 <= cx < width * 0.66]
-        right_cxs = [cx for cx in cxs if cx >= width * 0.66]
+        # 1. סיווג כל בלוק לטור שלו לפי מרכז הכובד האופקי
+        block_assignments = []
+        for b in blocks:
+            b_bbox = b["bbox"]
+            b_width = b_bbox[2] - b_bbox[0]
+            b_cx = (b_bbox[0] + b_bbox[2]) / 2
 
-        # קביעת עוגנים דינמיים לפי החציון האמיתי של הטקסט, או ברירת מחדל אם אזור ריק
-        anchor_left = np.median(left_cxs) if left_cxs else width * 0.16
-        anchor_center = np.median(center_cxs) if center_cxs else width * 0.5
-        anchor_right = np.median(right_cxs) if right_cxs else width * 0.83
-
-        # מסודר מימין לשמאל: עוגן ימין, עוגן אמצע, עוגן שמאל
-        anchors = [anchor_right, anchor_center, anchor_left]
-
-        # 3. שיוך מילים: כל מילה מנותחת לאיזה מרכז כובד היא הכי קרובה
-        col_words = [[], [], []]
-        for w in valid_words:
-            cx = (w[0] + w[2]) / 2
-            # חישוב המרחק של המילה מכל אחד ממרכזי הטורים
-            distances = [abs(cx - a) for a in anchors]
-            # שיוך המילה לטור שהמרחק אליו הוא המינימלי ביותר
-            closest_idx = distances.index(min(distances))
-            col_words[closest_idx].append(w)
-
-        page_dict = page.get_text("dict")
-        images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
-
-        # 4. חיתוך ומחיקה (ה"טיפקס")
-        for col_idx in range(3):
-            my_words = col_words[col_idx]
-            if not my_words:
-                continue
-
-            # גבולות החיתוך ייקבעו לפי המילה הקיצונית ביותר ששייכת לטור הזה
-            min_x = min([w[0] for w in my_words])
-            max_x = max([w[2] for w in my_words])
+            # כותרות או קווים שחוצים את רוב העמוד - נשייך לכל הטורים
+            if b_width > width * 0.75:
+                target_cols = [0, 1, 2]
+            else:
+                if b_cx >= width * 0.63:
+                    target_cols = [0] # ימין
+                elif b_cx >= width * 0.33:
+                    target_cols = [1] # אמצע
+                else:
+                    target_cols = [2] # שמאל
             
-            # תוספת שוליים בטוחים
-            pad = 5
-            col_rect = fitz.Rect(max(0, min_x - pad), top_margin, min(width, max_x + pad), crop_height)
+            block_assignments.append({"block": b, "cols": target_cols})
 
-            if col_rect.width <= 0 or col_rect.height <= 0:
-                continue
-
-            # יצירת דף חדש וגזירת האזור הרחב ביותר של הטור
-            new_page = out_doc.new_page(width=col_rect.width, height=col_rect.height)
-            new_page.show_pdf_page(new_page.rect, doc, page_num, clip=col_rect)
-
-            # פה קורה הקסם: עוברים על המילים של הטורים *האחרים* שזלגו פנימה, ומוחקים אותן בלבן
-            for other_idx in range(3):
-                if other_idx == col_idx:
-                    continue
+        # 2. יצירת 3 עמודים חדשים (אחד לכל טור)
+        for col_idx in [0, 1, 2]:
+            new_page = out_doc.new_page(width=width, height=height)
+            new_page.show_pdf_page(new_page.rect, doc, page_num)
+            
+            valid_bboxes = []
+            
+            # 3. מחיקת הטורים הלא רלוונטיים באמצעות ציור מלבנים לבנים
+            for item in block_assignments:
+                b = item["block"]
+                cols = item["cols"]
                 
-                for w in col_words[other_idx]:
-                    w_rect = fitz.Rect(w[:4])
-                    # אם מילה מטור שכן "פלשה" לתוך שטח הגזירה שלנו
-                    if w_rect.intersects(col_rect):
-                        # חישוב המיקום שלה על הדף החדש והוספת שולי מחיקה של 1 פיקסל למניעת שאריות
-                        wx0 = w[0] - col_rect.x0 - 1
-                        wy0 = w[1] - col_rect.y0 - 1
-                        wx1 = w[2] - col_rect.x0 + 1
-                        wy1 = w[3] - col_rect.y0 + 1
-                        
-                        erase_rect = fitz.Rect(wx0, wy0, wx1, wy1)
-                        # ציור מלבן לבן שמסתיר את המילה הפולשת
+                if col_idx not in cols:
+                    # מחיקה
+                    if b["type"] == 0: # טקסט
+                        for line in b.get("lines", []):
+                            l_bbox = line["bbox"]
+                            # שוליים של 3 פיקסלים להבטיח מחיקת ניקוד
+                            erase_rect = fitz.Rect(l_bbox[0]-3, l_bbox[1]-3, l_bbox[2]+3, l_bbox[3]+3)
+                            new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+                    elif b["type"] == 1: # תמונה
+                        i_bbox = b["bbox"]
+                        erase_rect = fitz.Rect(i_bbox[0]-3, i_bbox[1]-3, i_bbox[2]+3, i_bbox[3]+3)
                         new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-                        
-            # טיפול בתמונות - הצגתן נקי ללא מחיקות מיותרות מעליהן
-            for img in images:
-                img_bbox = fitz.Rect(img["bbox"])
-                img_cx = (img_bbox.x0 + img_bbox.x1) / 2
+                else:
+                    # הבלוק שייך לטור הזה - נשמור את גבולותיו לטובת החיתוך הסופי
+                    if b["type"] == 0: # טקסט
+                        for line in b.get("lines", []):
+                            valid_bboxes.append(line["bbox"])
+                    elif b["type"] == 1: # תמונה
+                        valid_bboxes.append(b["bbox"])
+            
+            # 4. חיתוך העמוד כך שיכיל רק את הטור הרלוונטי
+            if valid_bboxes:
+                min_x = min([box[0] for box in valid_bboxes])
+                min_y = min([box[1] for box in valid_bboxes])
+                max_x = max([box[2] for box in valid_bboxes])
+                max_y = max([box[3] for box in valid_bboxes])
                 
-                # לאיזה טור התמונה הכי קרובה?
-                img_distances = [abs(img_cx - a) for a in anchors]
-                img_closest_idx = img_distances.index(min(img_distances))
+                pad_x = 15
+                pad_y = 15
                 
-                shifted_bbox = fitz.Rect(
-                    img_bbox.x0 - col_rect.x0, 
-                    img_bbox.y0 - col_rect.y0, 
-                    img_bbox.x1 - col_rect.x0, 
-                    img_bbox.y1 - col_rect.y0
+                crop_rect = fitz.Rect(
+                    max(0, min_x - pad_x),
+                    max(0, min_y - pad_y),
+                    min(width, max_x + pad_x),
+                    min(height, max_y + pad_y)
                 )
                 
-                if img_closest_idx != col_idx:
-                     # מסתירים תמונה ששייכת לטור אחר ופלשה לטור הזה
-                     new_page.draw_rect(shifted_bbox, color=(1,1,1), fill=(1,1,1))
+                # חיתוך העמוד
+                if crop_rect.width > 20 and crop_rect.height > 20:
+                    new_page.set_cropbox(crop_rect)
                 else:
-                    # מזרקים את התמונה שלנו מחדש כדי להבטיח שהיא מופיעה מעל שכבות המחיקה (הטיפקס)
-                    img_bytes = img.get("image")
-                    if img_bytes and img_bbox.width > 0:
-                        # התאמת גודל התמונה אם היא רחבה מדי מהטור שנגזר
-                        scale = col_rect.width / img_bbox.width if img_bbox.width > col_rect.width else 1.0
-                        new_width = img_bbox.width * scale
-                        new_height = img_bbox.height * scale
-                        
-                        target_rect = fitz.Rect(0, shifted_bbox.y0, new_width, shifted_bbox.y0 + new_height)
-                        new_page.insert_image(target_rect, stream=img_bytes)
+                    out_doc.delete_page(-1)
+            else:
+                out_doc.delete_page(-1) # אין תוכן בטור הזה
 
     out_doc.save(output_pdf_path)
     out_doc.close()
