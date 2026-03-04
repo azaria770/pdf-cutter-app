@@ -237,8 +237,8 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     """
-    מפצל PDF ל-3 טורים באמצעות זיהוי קופסאות (Blocks) ומחיקה אקטיבית (טיפקס).
-    עוקף את בעיית הטקסט המתעקל (זיגזג) שעוטף תמונות.
+    מפצל PDF ל-3 טורים. משייך בלוקים (טקסט/תמונה) לטור הרלוונטי, מוחק בלוקים שזלגו מטורים שכנים בלבן (טיפקס),
+    ולבסוף חותך פיזית (Cropbox) את העמוד כך שיוצג אך ורק הטור עצמו ללא השוליים הלבנים של שאר העמוד.
     """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
@@ -277,60 +277,79 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
 
         # 2. יצירת 3 עמודים חדשים (אחד לכל טור)
         for col_idx in [0, 1, 2]:
+            # המערכים הללו יאספו את הקואורדינטות המדויקות לחישוב גודל הטור
+            valid_bboxes = [] # כל מה שיוצג (כולל כותרות משותפות)
+            core_bboxes = []  # טקסט ששייך *רק* לטור הזה (כדי לאמוד נכון את רוחב הטור ללא כותרות ענק)
+
+            for item in block_assignments:
+                b = item["block"]
+                cols = item["cols"]
+                
+                if col_idx in cols:
+                    if b["type"] == 0: # טקסט
+                        for line in b.get("lines", []):
+                            valid_bboxes.append(line["bbox"])
+                            if len(cols) == 1:
+                                core_bboxes.append(line["bbox"])
+                    elif b["type"] == 1: # תמונה
+                        valid_bboxes.append(b["bbox"])
+                        if len(cols) == 1:
+                            core_bboxes.append(b["bbox"])
+
+            if not valid_bboxes:
+                continue # אין תוכן בטור הזה, מדלגים עליו
+            
+            # מעתיקים את העמוד בשלמותו
             new_page = out_doc.new_page(width=width, height=height)
             new_page.show_pdf_page(new_page.rect, doc, page_num)
             
-            valid_bboxes = []
-            
-            # 3. מחיקת הטורים הלא רלוונטיים באמצעות ציור מלבנים לבנים
+            # 3. "טיפקס וירטואלי": מחיקת הטורים הלא רלוונטיים באמצעות ציור מלבנים לבנים
             for item in block_assignments:
                 b = item["block"]
                 cols = item["cols"]
                 
                 if col_idx not in cols:
-                    # מחיקה
+                    # הבלוק הזה שייך לטור אחר - נמחק אותו
                     if b["type"] == 0: # טקסט
                         for line in b.get("lines", []):
                             l_bbox = line["bbox"]
-                            # שוליים של 3 פיקסלים להבטיח מחיקת ניקוד
+                            # שוליים של 3 פיקסלים להבטיח מחיקת ניקוד שזלג
                             erase_rect = fitz.Rect(l_bbox[0]-3, l_bbox[1]-3, l_bbox[2]+3, l_bbox[3]+3)
                             new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
                     elif b["type"] == 1: # תמונה
                         i_bbox = b["bbox"]
                         erase_rect = fitz.Rect(i_bbox[0]-3, i_bbox[1]-3, i_bbox[2]+3, i_bbox[3]+3)
                         new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-                else:
-                    # הבלוק שייך לטור הזה - נשמור את גבולותיו לטובת החיתוך הסופי
-                    if b["type"] == 0: # טקסט
-                        for line in b.get("lines", []):
-                            valid_bboxes.append(line["bbox"])
-                    elif b["type"] == 1: # תמונה
-                        valid_bboxes.append(b["bbox"])
             
-            # 4. חיתוך העמוד כך שיכיל רק את הטור הרלוונטי
-            if valid_bboxes:
-                min_x = min([box[0] for box in valid_bboxes])
-                min_y = min([box[1] for box in valid_bboxes])
-                max_x = max([box[2] for box in valid_bboxes])
-                max_y = max([box[3] for box in valid_bboxes])
-                
-                pad_x = 15
-                pad_y = 15
-                
-                crop_rect = fitz.Rect(
-                    max(0, min_x - pad_x),
-                    max(0, min_y - pad_y),
-                    min(width, max_x + pad_x),
-                    min(height, max_y + pad_y)
-                )
-                
-                # חיתוך העמוד
-                if crop_rect.width > 20 and crop_rect.height > 20:
-                    new_page.set_cropbox(crop_rect)
-                else:
-                    out_doc.delete_page(-1)
+            # 4. חיתוך פיזי של העמוד (כדי שלא יוצג הלבן של הטורים האחרים)
+            # את הגובה נחשב לפי כל התוכן (כולל כותרות משותפות כדי לא לגזום אותן)
+            min_y = min([box[1] for box in valid_bboxes])
+            max_y = max([box[3] for box in valid_bboxes])
+            
+            # את הרוחב נחשב *רק* לפי הבלוקים הייחודיים לטור (core_bboxes) כדי שהכותרת לא תרחיב את הטור על פני כל העמוד
+            if core_bboxes:
+                min_x = min([box[0] for box in core_bboxes])
+                max_x = max([box[2] for box in core_bboxes])
             else:
-                out_doc.delete_page(-1) # אין תוכן בטור הזה
+                min_x = min([box[0] for box in valid_bboxes])
+                max_x = max([box[2] for box in valid_bboxes])
+                
+            pad_x = 10
+            pad_y = 15
+            
+            crop_rect = fitz.Rect(
+                max(0, min_x - pad_x),
+                max(0, min_y - pad_y),
+                min(width, max_x + pad_x),
+                min(height, max_y + pad_y)
+            )
+            
+            # ביצוע החיתוך הפיזי על המידות המדויקות של הטור
+            if crop_rect.width > 20 and crop_rect.height > 20:
+                new_page.set_cropbox(crop_rect)
+                new_page.set_mediabox(crop_rect)
+            else:
+                out_doc.delete_page(-1)
 
     out_doc.save(output_pdf_path)
     out_doc.close()
