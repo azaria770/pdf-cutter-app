@@ -237,8 +237,8 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     """
-    מפצל PDF ל-3 טורים. משייך בלוקים (טקסט/תמונה) לטור הרלוונטי, מוחק בלוקים שזלגו מטורים שכנים בלבן (טיפקס),
-    ולבסוף חותך פיזית (Cropbox) את העמוד כך שיוצג אך ורק הטור עצמו ללא השוליים הלבנים של שאר העמוד.
+    מפצל PDF ל-3 טורים באמצעות זיהוי שורות (Lines) ועוגנים דינמיים.
+    הלוגיקה שופרה כדי למנוע מחיקה של טקסט בטורים שהוזזו בגלל תמונות ועיטורים.
     """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
@@ -248,106 +248,120 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         width = page.rect.width
         height = page.rect.height
 
-        # חילוץ כל הבלוקים (טקסט ותמונות) בעמוד
+        top_margin = 40
+        bottom_margin = 40
+        crop_height = height - bottom_margin
+
         page_dict = page.get_text("dict")
         blocks = page_dict.get("blocks", [])
 
         if not blocks:
             continue
 
-        # 1. סיווג כל בלוק לטור שלו לפי מרכז הכובד האופקי
-        block_assignments = []
+        # 1. חילוץ ושמירה של כל השורות והתמונות בנפרד למניעת בעיות סיווג של בלוקים שלמים
+        all_items = []
         for b in blocks:
-            b_bbox = b["bbox"]
-            b_width = b_bbox[2] - b_bbox[0]
-            b_cx = (b_bbox[0] + b_bbox[2]) / 2
+            if b["type"] == 0:  # טקסט
+                for line in b.get("lines", []):
+                    l_bbox = line["bbox"]
+                    # מתעלם משורות עליונות או תחתונות מדי שמבלבלות את החישוב (כותרות ומספרי עמודים)
+                    if l_bbox[1] < top_margin or l_bbox[3] > crop_height:
+                        continue
+                    l_cx = (l_bbox[0] + l_bbox[2]) / 2
+                    l_width = l_bbox[2] - l_bbox[0]
+                    all_items.append({"bbox": l_bbox, "cx": l_cx, "width": l_width, "type": 0})
+            elif b["type"] == 1:  # תמונה
+                i_bbox = b["bbox"]
+                if i_bbox[1] < top_margin or i_bbox[3] > crop_height:
+                    continue
+                i_cx = (i_bbox[0] + i_bbox[2]) / 2
+                i_width = i_bbox[2] - i_bbox[0]
+                all_items.append({"bbox": i_bbox, "cx": i_cx, "width": i_width, "type": 1})
 
-            # כותרות או קווים שחוצים את רוב העמוד - נשייך לכל הטורים
-            if b_width > width * 0.75:
+        if not all_items:
+            continue
+
+        # 2. חישוב עוגנים דינמיים - מציאת המרכז האמיתי של כל טור לפי פיזור השורות
+        # מתעלמים מכותרות רחבות בעת חישוב העוגן
+        cxs = [item["cx"] for item in all_items if item["width"] < width * 0.4]
+        
+        left_cxs = [cx for cx in cxs if cx < width * 0.33]
+        center_cxs = [cx for cx in cxs if width * 0.33 <= cx < width * 0.66]
+        right_cxs = [cx for cx in cxs if cx >= width * 0.66]
+
+        anchor_left = np.median(left_cxs) if left_cxs else width * 0.16
+        anchor_center = np.median(center_cxs) if center_cxs else width * 0.5
+        anchor_right = np.median(right_cxs) if right_cxs else width * 0.83
+
+        # מסודר מימין לשמאל כדי לשמור על סדר הקריאה
+        anchors = [anchor_right, anchor_center, anchor_left] 
+
+        # 3. שיוך כל פריט (שורה/תמונה) לטור הרלוונטי
+        item_assignments = []
+        for item in all_items:
+            if item["width"] > width * 0.7:  # כותרת שחוצה את כל העמוד
+                target_cols = [0, 1, 2]
+            elif item["type"] == 1 and item["width"] > width * 0.4:  # תמונה גדולה במיוחד
                 target_cols = [0, 1, 2]
             else:
-                if b_cx >= width * 0.63:
-                    target_cols = [0] # ימין
-                elif b_cx >= width * 0.33:
-                    target_cols = [1] # אמצע
-                else:
-                    target_cols = [2] # שמאל
-            
-            block_assignments.append({"block": b, "cols": target_cols})
-
-        # 2. יצירת 3 עמודים חדשים (אחד לכל טור)
-        for col_idx in [0, 1, 2]:
-            # המערכים הללו יאספו את הקואורדינטות המדויקות לחישוב גודל הטור
-            valid_bboxes = [] # כל מה שיוצג (כולל כותרות משותפות)
-            core_bboxes = []  # טקסט ששייך *רק* לטור הזה (כדי לאמוד נכון את רוחב הטור ללא כותרות ענק)
-
-            for item in block_assignments:
-                b = item["block"]
-                cols = item["cols"]
+                # חישוב למי משלושת העוגנים השורה הכי קרובה
+                distances = [abs(item["cx"] - a) for a in anchors]
+                closest_idx = distances.index(min(distances))
+                target_cols = [closest_idx]
                 
-                if col_idx in cols:
-                    if b["type"] == 0: # טקסט
-                        for line in b.get("lines", []):
-                            valid_bboxes.append(line["bbox"])
-                            if len(cols) == 1:
-                                core_bboxes.append(line["bbox"])
-                    elif b["type"] == 1: # תמונה
-                        valid_bboxes.append(b["bbox"])
-                        if len(cols) == 1:
-                            core_bboxes.append(b["bbox"])
+            item_assignments.append({"item": item, "cols": target_cols})
 
-            if not valid_bboxes:
-                continue # אין תוכן בטור הזה, מדלגים עליו
-            
-            # מעתיקים את העמוד בשלמותו
+        # 4. בניית שלושת העמודים מחדש
+        for col_idx in [0, 1, 2]:
             new_page = out_doc.new_page(width=width, height=height)
             new_page.show_pdf_page(new_page.rect, doc, page_num)
             
-            # 3. "טיפקס וירטואלי": מחיקת הטורים הלא רלוונטיים באמצעות ציור מלבנים לבנים
-            for item in block_assignments:
-                b = item["block"]
-                cols = item["cols"]
+            valid_bboxes = [] # כלל האלמנטים שיוצגו
+            core_bboxes = []  # אלמנטים ייחודיים לטור זה (לחישוב רוחב נקי)
+            
+            # 5. "טיפקס" - מחיקת מילים שזלגו מהטורים האחרים
+            for assignment in item_assignments:
+                item = assignment["item"]
+                cols = assignment["cols"]
+                bbox = item["bbox"]
                 
                 if col_idx not in cols:
-                    # הבלוק הזה שייך לטור אחר - נמחק אותו
-                    if b["type"] == 0: # טקסט
-                        for line in b.get("lines", []):
-                            l_bbox = line["bbox"]
-                            # שוליים של 3 פיקסלים להבטיח מחיקת ניקוד שזלג
-                            erase_rect = fitz.Rect(l_bbox[0]-3, l_bbox[1]-3, l_bbox[2]+3, l_bbox[3]+3)
-                            new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-                    elif b["type"] == 1: # תמונה
-                        i_bbox = b["bbox"]
-                        erase_rect = fitz.Rect(i_bbox[0]-3, i_bbox[1]-3, i_bbox[2]+3, i_bbox[3]+3)
-                        new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-            
-            # 4. חיתוך פיזי של העמוד (כדי שלא יוצג הלבן של הטורים האחרים)
-            # את הגובה נחשב לפי כל התוכן (כולל כותרות משותפות כדי לא לגזום אותן)
-            min_y = min([box[1] for box in valid_bboxes])
-            max_y = max([box[3] for box in valid_bboxes])
-            
-            # את הרוחב נחשב *רק* לפי הבלוקים הייחודיים לטור (core_bboxes) כדי שהכותרת לא תרחיב את הטור על פני כל העמוד
-            if core_bboxes:
-                min_x = min([box[0] for box in core_bboxes])
-                max_x = max([box[2] for box in core_bboxes])
-            else:
-                min_x = min([box[0] for box in valid_bboxes])
-                max_x = max([box[2] for box in valid_bboxes])
+                    # מחיקה עדינה עם ריווח קטן מאוד (1.5) כדי לא למחוק ניקוד של הטור שלנו
+                    erase_rect = fitz.Rect(bbox[0]-1.5, bbox[1]-1.5, bbox[2]+1.5, bbox[3]+1.5)
+                    new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+                else:
+                    valid_bboxes.append(bbox)
+                    if len(cols) == 1:
+                        core_bboxes.append(bbox)
+
+            # 6. חיתוך (Crop) לאזור הנקי
+            if valid_bboxes:
+                min_y = min([box[1] for box in valid_bboxes])
+                max_y = max([box[3] for box in valid_bboxes])
                 
-            pad_x = 10
-            pad_y = 15
-            
-            crop_rect = fitz.Rect(
-                max(0, min_x - pad_x),
-                max(0, min_y - pad_y),
-                min(width, max_x + pad_x),
-                min(height, max_y + pad_y)
-            )
-            
-            # ביצוע החיתוך הפיזי על המידות המדויקות של הטור
-            if crop_rect.width > 20 and crop_rect.height > 20:
-                new_page.set_cropbox(crop_rect)
-                new_page.set_mediabox(crop_rect)
+                # רוחב יחושב לפי הליבה כדי שכותרת משותפת לא תרחיב את הטור
+                if core_bboxes:
+                    min_x = min([box[0] for box in core_bboxes])
+                    max_x = max([box[2] for box in core_bboxes])
+                else:
+                    min_x = min([box[0] for box in valid_bboxes])
+                    max_x = max([box[2] for box in valid_bboxes])
+                    
+                pad_x = 10
+                pad_y = 15
+                
+                crop_rect = fitz.Rect(
+                    max(0, min_x - pad_x),
+                    max(0, min_y - pad_y),
+                    min(width, max_x + pad_x),
+                    min(height, max_y + pad_y)
+                )
+                
+                if crop_rect.width > 30 and crop_rect.height > 30:
+                    new_page.set_cropbox(crop_rect)
+                    new_page.set_mediabox(crop_rect)
+                else:
+                    out_doc.delete_page(-1)
             else:
                 out_doc.delete_page(-1)
 
