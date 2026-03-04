@@ -237,8 +237,9 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     """
-    מפצל PDF ל-3 טורים באמצעות זיהוי שורות (Lines) ועוגנים דינמיים.
-    הלוגיקה שופרה כדי למנוע מחיקה של טקסט בטורים שהוזזו בגלל תמונות ועיטורים.
+    מפצל PDF ל-3 טורים בעזרת "OCR ויזואלי" (OpenCV Contours).
+    הקוד מייצר צורות מדויקות מסביב לפסקאות המתעקלות (כמו לאסו), 
+    ומשייך כל מילה לצורה שלה.
     """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
@@ -248,105 +249,133 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         width = page.rect.width
         height = page.rect.height
 
-        top_margin = 40
-        bottom_margin = 40
-        crop_height = height - bottom_margin
-
+        # חילוץ המילים מתוך קובץ ה-PDF
+        words = page.get_text("words")
         page_dict = page.get_text("dict")
-        blocks = page_dict.get("blocks", [])
+        images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
 
-        if not blocks:
+        if not words:
             continue
 
-        # 1. חילוץ ושמירה של כל השורות והתמונות בנפרד למניעת בעיות סיווג של בלוקים שלמים
-        all_items = []
-        for b in blocks:
-            if b["type"] == 0:  # טקסט
-                for line in b.get("lines", []):
-                    l_bbox = line["bbox"]
-                    # מתעלם משורות עליונות או תחתונות מדי שמבלבלות את החישוב (כותרות ומספרי עמודים)
-                    if l_bbox[1] < top_margin or l_bbox[3] > crop_height:
-                        continue
-                    l_cx = (l_bbox[0] + l_bbox[2]) / 2
-                    l_width = l_bbox[2] - l_bbox[0]
-                    all_items.append({"bbox": l_bbox, "cx": l_cx, "width": l_width, "type": 0})
-            elif b["type"] == 1:  # תמונה
-                i_bbox = b["bbox"]
-                if i_bbox[1] < top_margin or i_bbox[3] > crop_height:
-                    continue
-                i_cx = (i_bbox[0] + i_bbox[2]) / 2
-                i_width = i_bbox[2] - i_bbox[0]
-                all_items.append({"bbox": i_bbox, "cx": i_cx, "width": i_width, "type": 1})
-
-        if not all_items:
-            continue
-
-        # 2. חישוב עוגנים דינמיים - מציאת המרכז האמיתי של כל טור לפי פיזור השורות
-        # מתעלמים מכותרות רחבות בעת חישוב העוגן
-        cxs = [item["cx"] for item in all_items if item["width"] < width * 0.4]
+        # 1. המרת הדף לתמונה ברזולוציה גבוהה כדי לנתח ויזואלית את הטורים
+        scale = 2.0
+        pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale), colorspace=fitz.csGRAY)
+        img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
         
-        left_cxs = [cx for cx in cxs if cx < width * 0.33]
-        center_cxs = [cx for cx in cxs if width * 0.33 <= cx < width * 0.66]
-        right_cxs = [cx for cx in cxs if cx >= width * 0.66]
+        # הופכים את התמונה לשחור לבן קשיח - הטקסט יהיה לבן והרקע שחור
+        _, thresh = cv2.threshold(img_array, 200, 255, cv2.THRESH_BINARY_INV)
 
-        anchor_left = np.median(left_cxs) if left_cxs else width * 0.16
-        anchor_center = np.median(center_cxs) if center_cxs else width * 0.5
-        anchor_right = np.median(right_cxs) if right_cxs else width * 0.83
+        # 2. מחיקת תמונות מהתמונה הויזואלית כדי שלא יחברו בין טורים
+        for img_b in images:
+            ib = img_b["bbox"]
+            cv2.rectangle(thresh, (int(ib[0]*scale), int(ib[1]*scale)), (int(ib[2]*scale), int(ib[3]*scale)), 0, -1)
 
-        # מסודר מימין לשמאל כדי לשמור על סדר הקריאה
-        anchors = [anchor_right, anchor_center, anchor_left] 
+        # 3. מריחת פיקסלים (Dilation) כדי לחבר מילים לפסקאות רציפות
+        # הקרנל (15x15) מספיק גדול לחבר מילים באותו טור, אבל לא יחצה את המרווח הריק בין הטורים
+        kernel = np.ones((15, 15), np.uint8)
+        dilated = cv2.dilate(thresh, kernel, iterations=1)
 
-        # 3. שיוך כל פריט (שורה/תמונה) לטור הרלוונטי
-        item_assignments = []
-        for item in all_items:
-            if item["width"] > width * 0.7:  # כותרת שחוצה את כל העמוד
-                target_cols = [0, 1, 2]
-            elif item["type"] == 1 and item["width"] > width * 0.4:  # תמונה גדולה במיוחד
-                target_cols = [0, 1, 2]
+        # איתור קווי המתאר (הפוליגונים/הצורות הויזואליות של הטורים)
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        # 4. הכנת 3 'מסיכות' שחורות (אחת לכל טור) שעליהן נצייר את הצורות שזיהינו
+        mask_right = np.zeros_like(thresh)
+        mask_center = np.zeros_like(thresh)
+        mask_left = np.zeros_like(thresh)
+
+        for cnt in contours:
+            x, y, w_cnt, h_cnt = cv2.boundingRect(cnt)
+            if w_cnt < 10 or h_cnt < 10: 
+                continue
+            
+            cx = x + w_cnt / 2
+            
+            # אם הצורה רחבה מאוד (כותרת שחוצה את העמוד) - נשייך אותה לכל המסכות
+            if w_cnt > width * scale * 0.7:
+                cv2.drawContours(mask_right, [cnt], -1, 255, -1)
+                cv2.drawContours(mask_center, [cnt], -1, 255, -1)
+                cv2.drawContours(mask_left, [cnt], -1, 255, -1)
             else:
-                # חישוב למי משלושת העוגנים השורה הכי קרובה
-                distances = [abs(item["cx"] - a) for a in anchors]
-                closest_idx = distances.index(min(distances))
-                target_cols = [closest_idx]
-                
-            item_assignments.append({"item": item, "cols": target_cols})
+                # שיוך הצורה לטור ימין, אמצע או שמאל
+                if cx > width * scale * 0.63:
+                    cv2.drawContours(mask_right, [cnt], -1, 255, -1)
+                elif cx > width * scale * 0.33:
+                    cv2.drawContours(mask_center, [cnt], -1, 255, -1)
+                else:
+                    cv2.drawContours(mask_left, [cnt], -1, 255, -1)
 
-        # 4. בניית שלושת העמודים מחדש
-        for col_idx in [0, 1, 2]:
+        # 5. שיוך סופי של כל מילה (מה-PDF) למסיכה שעליה היא "יושבת"
+        word_to_cols = []
+        for w in words:
+            # מציאת נקודת האמצע של המילה בקואורדינטות של התמונה המוגדלת
+            wx = int((w[0] + w[2]) / 2 * scale)
+            wy = int((w[1] + w[3]) / 2 * scale)
+            
+            # וידוא חריגות
+            wx = min(max(wx, 0), mask_right.shape[1] - 1)
+            wy = min(max(wy, 0), mask_right.shape[0] - 1)
+
+            assigned = []
+            if mask_right[wy, wx] == 255: assigned.append(0)
+            if mask_center[wy, wx] == 255: assigned.append(1)
+            if mask_left[wy, wx] == 255: assigned.append(2)
+
+            # אם מילה נפלה מחוץ לצורה (למשל פסיק שזלג), נשייך לפי מיקום אופקי קלאסי
+            if not assigned:
+                cx = (w[0] + w[2]) / 2
+                if cx > width * 0.63: assigned.append(0)
+                elif cx > width * 0.33: assigned.append(1)
+                else: assigned.append(2)
+
+            word_to_cols.append({"word": w, "cols": assigned})
+
+        # שיוך התמונות עצמן
+        img_to_cols = []
+        for img_b in images:
+            ib = img_b["bbox"]
+            cx = (ib[0] + ib[2]) / 2
+            if cx > width * 0.63: cols = [0]
+            elif cx > width * 0.33: cols = [1]
+            else: cols = [2]
+            img_to_cols.append({"bbox": ib, "image": img_b.get("image"), "cols": cols})
+
+        # 6. יצירת העמודים החתוכים
+        for col_idx in [0, 1, 2]: # ימין, מרכז, שמאל
+            my_words = []
+            other_words = []
+            
+            for item in word_to_cols:
+                if col_idx in item["cols"]:
+                    my_words.append(item["word"])
+                else:
+                    other_words.append(item["word"])
+
+            if not my_words and not any(col_idx in i["cols"] for i in img_to_cols):
+                continue
+
             new_page = out_doc.new_page(width=width, height=height)
             new_page.show_pdf_page(new_page.rect, doc, page_num)
-            
-            valid_bboxes = [] # כלל האלמנטים שיוצגו
-            core_bboxes = []  # אלמנטים ייחודיים לטור זה (לחישוב רוחב נקי)
-            
-            # 5. "טיפקס" - מחיקת מילים שזלגו מהטורים האחרים
-            for assignment in item_assignments:
-                item = assignment["item"]
-                cols = assignment["cols"]
-                bbox = item["bbox"]
-                
-                if col_idx not in cols:
-                    # מחיקה עדינה עם ריווח קטן מאוד (1.5) כדי לא למחוק ניקוד של הטור שלנו
-                    erase_rect = fitz.Rect(bbox[0]-1.5, bbox[1]-1.5, bbox[2]+1.5, bbox[3]+1.5)
-                    new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-                else:
-                    valid_bboxes.append(bbox)
-                    if len(cols) == 1:
-                        core_bboxes.append(bbox)
 
-            # 6. חיתוך (Crop) לאזור הנקי
-            if valid_bboxes:
-                min_y = min([box[1] for box in valid_bboxes])
-                max_y = max([box[3] for box in valid_bboxes])
+            # מחיקה מדויקת ("טיפקס") של כל המילים שלא שייכות לטור (גם אלו שפלשו בזיגזג)
+            for w in other_words:
+                # הוספת 2.5 פיקסלים למחיקה כדי להבטיח שניקוד ופסיקים יימחקו לחלוטין
+                erase_rect = fitz.Rect(w[0]-2.5, w[1]-2.5, w[2]+2.5, w[3]+2.5)
+                new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+
+            # מחיקת תמונות לא רלוונטיות
+            for item in img_to_cols:
+                if col_idx not in item["cols"]:
+                    ib = item["bbox"]
+                    erase_rect = fitz.Rect(ib[0]-3, ib[1]-3, ib[2]+3, ib[3]+3)
+                    new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+
+            # 7. חיתוך פיזי עמוק של העמוד
+            if my_words:
+                min_x = min([w[0] for w in my_words])
+                max_x = max([w[2] for w in my_words])
+                min_y = min([w[1] for w in my_words])
+                max_y = max([w[3] for w in my_words])
                 
-                # רוחב יחושב לפי הליבה כדי שכותרת משותפת לא תרחיב את הטור
-                if core_bboxes:
-                    min_x = min([box[0] for box in core_bboxes])
-                    max_x = max([box[2] for box in core_bboxes])
-                else:
-                    min_x = min([box[0] for box in valid_bboxes])
-                    max_x = max([box[2] for box in valid_bboxes])
-                    
                 pad_x = 10
                 pad_y = 15
                 
@@ -357,7 +386,7 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
                     min(height, max_y + pad_y)
                 )
                 
-                if crop_rect.width > 30 and crop_rect.height > 30:
+                if crop_rect.width > 20 and crop_rect.height > 20:
                     new_page.set_cropbox(crop_rect)
                     new_page.set_mediabox(crop_rect)
                 else:
