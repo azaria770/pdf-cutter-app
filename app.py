@@ -13,7 +13,7 @@ import urllib.parse
 import datetime
 import requests 
 from bs4 import BeautifulSoup
-import subprocess  # <--- הוספנו כדי להפעיל את Ghostscript
+import subprocess
 
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
@@ -63,10 +63,6 @@ def get_next_saturday_1600(from_date):
 # --- פונקציית האוטומציה המרכזית ---
 
 def prepare_auto_pdf():
-    """
-    מנהל את הלוגיקה האוטומטית.
-    מחזיר: (הצלחה?, הודעת_שגיאה, שם_הקובץ)
-    """
     config = get_config()
     last_post_id = config.get("last_post_id", DEFAULT_START_ID)
     last_drive_id = config.get("last_drive_id", None)
@@ -119,7 +115,6 @@ def prepare_auto_pdf():
                                     found_new = True
                                     break
 
-    # החזרת הקובץ המוכן אם כבר נחתך ואין חדש באופק
     if not found_new and os.path.exists(AUTO_REGULAR_PDF):
         if not os.path.exists(AUTO_REGULAR_BW_PDF): convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
         if not os.path.exists(AUTO_CUT_PDF): split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
@@ -158,7 +153,6 @@ def prepare_auto_pdf():
     with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
     with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
 
-    # --- עיבוד משולב: ייצור 4 הגרסאות של ה-PDF ---
     success = extract_pdf_by_images(downloaded_path, AUTO_REGULAR_PDF, start_b64, end_b64)
     if os.path.exists(downloaded_path): os.remove(downloaded_path)
 
@@ -181,15 +175,12 @@ def prepare_auto_pdf():
 # --- פונקציות עיבוד תצוגה וממשק מתקדם ---
 
 def display_pdf(file_path):
-    """מציג את ה-PDF ישירות בתוך ממשק האתר"""
     with open(file_path, "rb") as f:
         base64_pdf = base64.b64encode(f.read()).decode('utf-8')
     pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf" style="border: 1px solid #ccc; border-radius: 8px;"></iframe>'
     st.markdown(pdf_display, unsafe_allow_html=True)
 
 def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color, cut_bw, key_prefix):
-    """מנהל את התפריט ההיררכי לבחירת פורמט, פריסה ופעולה רצויה"""
-    
     if f"{key_prefix}_format" not in st.session_state:
         st.session_state[f"{key_prefix}_format"] = None
     if f"{key_prefix}_layout" not in st.session_state:
@@ -243,118 +234,108 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
             else:
                 st.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
 
+
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
+    """
+    מפצל PDF ל-3 טורים באמצעות "שיוך קרובים" (KNN) והסתרת טיפקס (Redaction).
+    עוקף לחלוטין את בעיית הזיגזג והטקסט שעוטף תמונות.
+    """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
 
     for page_num in range(len(doc)):
         page = doc[page_num]
-        rect = page.rect
-        width = rect.width
-        height = rect.height
+        width = page.rect.width
+        height = page.rect.height
 
         top_margin = 50
         bottom_margin = 50
         crop_height = height - bottom_margin
 
-        # שליפת כל המילים מהעמוד
+        # 1. חילוץ כל המילים החוקיות בעמוד
         words = page.get_text("words")
+        valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
+
+        if not valid_words:
+            continue
+
+        # 2. מציאת 'מרכזי הכובד' של שלושת הטורים (Anchors)
+        cxs = [(w[0] + w[2]) / 2 for w in valid_words]
         
-        # התמקדות רק בטקסט שבמרכז כדי להימנע מהפרעות של כותרות רחבות למעלה/למטה
-        mid_y_top = height * 0.15
-        mid_y_bottom = height * 0.85
-        valid_words = [w for w in words if w[1] >= mid_y_top and w[3] <= mid_y_bottom]
-        
-        # --- אלגוריתם חיתוך מבוסס מרווחים (Gaps) בכל שורה ---
-        lines = {}
+        left_cxs = [cx for cx in cxs if cx < width * 0.33]
+        center_cxs = [cx for cx in cxs if width * 0.33 <= cx < width * 0.66]
+        right_cxs = [cx for cx in cxs if cx >= width * 0.66]
+
+        # קביעת עוגנים דינמיים לפי החציון האמיתי של הטקסט, או ברירת מחדל אם אזור ריק
+        anchor_left = np.median(left_cxs) if left_cxs else width * 0.16
+        anchor_center = np.median(center_cxs) if center_cxs else width * 0.5
+        anchor_right = np.median(right_cxs) if right_cxs else width * 0.83
+
+        # מסודר מימין לשמאל: עוגן ימין, עוגן אמצע, עוגן שמאל
+        anchors = [anchor_right, anchor_center, anchor_left]
+
+        # 3. שיוך מילים: כל מילה מנותחת לאיזה מרכז כובד היא הכי קרובה
+        col_words = [[], [], []]
         for w in valid_words:
-            cy = (w[1] + w[3]) / 2
-            # קיבוץ לשורות באמצעות עיגול המרכז האנכי של המילה
-            line_key = round(cy / 5) * 5
-            if line_key not in lines:
-                lines[line_key] = []
-            lines[line_key].append(w)
-            
-        gap_centers_left = []
-        gap_centers_right = []
-        
-        for line_y, line_words in lines.items():
-            # מוודאים שיש לפחות 3 מילים בשורה כדי שיהיה מעברים בין טורים לחפש
-            if len(line_words) < 3:
-                continue
-                
-            # סידור המילים בשורה משמאל לימין
-            line_words.sort(key=lambda w: w[0])
-            gaps = []
-            
-            # חישוב המרחקים האופקיים בין כל מילה למילה שאחריה
-            for i in range(len(line_words) - 1):
-                w1 = line_words[i]
-                w2 = line_words[i+1]
-                gap_width = w2[0] - w1[2]
-                if gap_width > 5: # סינון חפיפות או מילים צמודות מדי
-                    gap_center = (w1[2] + w2[0]) / 2
-                    gaps.append((gap_width, gap_center))
-            
-            # לוקחים את שני המרווחים הרחבים ביותר מאותה שורה
-            gaps.sort(key=lambda x: x[0], reverse=True)
-            for gw, gc in gaps[:2]:
-                if gw > 15: # המרווח חייב להיות מספיק רחב (מעבר טור אמיתי ולא רק רווח בין מילים)
-                    if gc < width / 2:
-                        gap_centers_left.append(gc)
-                    else:
-                        gap_centers_right.append(gc)
-                        
-        # חילוץ קווי החיתוך המדויקים על בסיס החציון (מונע השפעה משורות חריגות)
-        if gap_centers_left:
-            split_left_mid = float(np.median(gap_centers_left))
-        else:
-            split_left_mid = width / 3
-            
-        if gap_centers_right:
-            split_mid_right = float(np.median(gap_centers_right))
-        else:
-            split_mid_right = 2 * width / 3
-
-        # מציאת גבולות הקיצון של הטקסט כדי לנקות שוליים בצדדים
-        all_page_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-        if all_page_words:
-            page_min_x = min([w[0] for w in all_page_words])
-            page_max_x = max([w[2] for w in all_page_words])
-        else:
-            page_min_x = 0
-            page_max_x = width
-
-        # יצירת אזורי החיתוך - הם ייחתכו בדיוק בקווי המרווח הסטטיסטיים שלנו
-        right_col = fitz.Rect(split_mid_right, top_margin, page_max_x + 5, crop_height)
-        middle_col = fitz.Rect(split_left_mid, top_margin, split_mid_right, crop_height)
-        left_col = fitz.Rect(page_min_x - 5, top_margin, split_left_mid, crop_height)
-
-        columns = [right_col, middle_col, left_col]
+            cx = (w[0] + w[2]) / 2
+            # חישוב המרחק של המילה מכל אחד ממרכזי הטורים
+            distances = [abs(cx - a) for a in anchors]
+            # שיוך המילה לטור שהמרחק אליו הוא המינימלי ביותר
+            closest_idx = distances.index(min(distances))
+            col_words[closest_idx].append(w)
 
         page_dict = page.get_text("dict")
         images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
 
-        for col_idx, col_rect in enumerate(columns):
+        # 4. חיתוך ומחיקה (ה"טיפקס")
+        for col_idx in range(3):
+            my_words = col_words[col_idx]
+            if not my_words:
+                continue
+
+            # גבולות החיתוך ייקבעו לפי המילה הקיצונית ביותר ששייכת לטור הזה
+            min_x = min([w[0] for w in my_words])
+            max_x = max([w[2] for w in my_words])
+            
+            # תוספת שוליים בטוחים
+            pad = 5
+            col_rect = fitz.Rect(max(0, min_x - pad), top_margin, min(width, max_x + pad), crop_height)
+
             if col_rect.width <= 0 or col_rect.height <= 0:
                 continue
-                
+
+            # יצירת דף חדש וגזירת האזור הרחב ביותר של הטור
             new_page = out_doc.new_page(width=col_rect.width, height=col_rect.height)
             new_page.show_pdf_page(new_page.rect, doc, page_num, clip=col_rect)
 
+            # פה קורה הקסם: עוברים על המילים של הטורים *האחרים* שזלגו פנימה, ומוחקים אותן בלבן
+            for other_idx in range(3):
+                if other_idx == col_idx:
+                    continue
+                
+                for w in col_words[other_idx]:
+                    w_rect = fitz.Rect(w[:4])
+                    # אם מילה מטור שכן "פלשה" לתוך שטח הגזירה שלנו
+                    if w_rect.intersects(col_rect):
+                        # חישוב המיקום שלה על הדף החדש והוספת שולי מחיקה של 1 פיקסל למניעת שאריות
+                        wx0 = w[0] - col_rect.x0 - 1
+                        wy0 = w[1] - col_rect.y0 - 1
+                        wx1 = w[2] - col_rect.x0 + 1
+                        wy1 = w[3] - col_rect.y0 + 1
+                        
+                        erase_rect = fitz.Rect(wx0, wy0, wx1, wy1)
+                        # ציור מלבן לבן שמסתיר את המילה הפולשת
+                        new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+                        
+            # טיפול בתמונות - הצגתן נקי ללא מחיקות מיותרות מעליהן
             for img in images:
                 img_bbox = fitz.Rect(img["bbox"])
-                intersections = [img_bbox.intersect(c).get_area() for c in columns]
+                img_cx = (img_bbox.x0 + img_bbox.x1) / 2
                 
-                if not intersections:
-                    continue
-                    
-                max_area = max(intersections)
+                # לאיזה טור התמונה הכי קרובה?
+                img_distances = [abs(img_cx - a) for a in anchors]
+                img_closest_idx = img_distances.index(min(img_distances))
                 
-                if max_area == 0:
-                    continue 
-                
-                assigned_col_idx = intersections.index(max_area)
                 shifted_bbox = fitz.Rect(
                     img_bbox.x0 - col_rect.x0, 
                     img_bbox.y0 - col_rect.y0, 
@@ -362,23 +343,27 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
                     img_bbox.y1 - col_rect.y0
                 )
                 
-                if col_idx != assigned_col_idx:
-                    new_page.draw_rect(shifted_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+                if img_closest_idx != col_idx:
+                     # מסתירים תמונה ששייכת לטור אחר ופלשה לטור הזה
+                     new_page.draw_rect(shifted_bbox, color=(1,1,1), fill=(1,1,1))
                 else:
-                    new_page.draw_rect(shifted_bbox, color=(1, 1, 1), fill=(1, 1, 1))
+                    # מזרקים את התמונה שלנו מחדש כדי להבטיח שהיא מופיעה מעל שכבות המחיקה (הטיפקס)
                     img_bytes = img.get("image")
                     if img_bytes and img_bbox.width > 0:
-                        scale = col_rect.width / img_bbox.width
+                        # התאמת גודל התמונה אם היא רחבה מדי מהטור שנגזר
+                        scale = col_rect.width / img_bbox.width if img_bbox.width > col_rect.width else 1.0
+                        new_width = img_bbox.width * scale
                         new_height = img_bbox.height * scale
-                        target_rect = fitz.Rect(0, shifted_bbox.y0, col_rect.width, shifted_bbox.y0 + new_height)
+                        
+                        target_rect = fitz.Rect(0, shifted_bbox.y0, new_width, shifted_bbox.y0 + new_height)
                         new_page.insert_image(target_rect, stream=img_bytes)
 
     out_doc.save(output_pdf_path)
     out_doc.close()
     doc.close()
 
+
 def convert_pdf_to_bw(input_path, output_path):
-    """ממיר קובץ PDF לגרסת שחור-לבן איכותית ווקטורית באמצעות המנוע של Ghostscript"""
     gs_cmd = [
         "gs",
         "-sOutputFile=" + output_path,
