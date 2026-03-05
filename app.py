@@ -237,8 +237,9 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
     """
-    מפצל PDF ל-3 טורים באמצעות זיהוי שורות וניתוח המרווחים (Gaps) בין המילים בכל שורה בנפרד.
-    אלגוריתם זה עוקף את בעיית הטקסט המתעקל (זיגזג) מכיוון שגבולות הטורים מחושבים מחדש לכל שורת טקסט.
+    אלגוריתם "Adobe OCR Flow": שימוש ביכולות ה-OCR והבלוקים של ה-PDF.
+    מקבץ את המילים לשורות טקסט אמיתיות, ומסווג כל שורה לטור שלה 
+    על בסיס הקצה הימני של השורה (שנשאר ישר לחלוטין בטקסט עברי למרות עיקולים וזיגזגים שמאליים).
     """
     doc = fitz.open(input_pdf_path)
     out_doc = fitz.open()
@@ -252,169 +253,155 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
         bottom_margin = 40
         crop_height = height - bottom_margin
 
-        # שליפת כל המילים
+        # 1. חילוץ המילים על ידי ה-OCR הפנימי (כולל מיפוי לבלוקים ושורות מקוריים של Adobe)
         words = page.get_text("words")
         
-        # סינון מילים שמופיעות בשוליים עליונים ותחתונים מאוד (מספרי עמוד, כותרות כלליות)
-        valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-        
-        if not valid_words:
+        if not words:
             continue
 
-        # 1. קיבוץ המילים לשורות לפי מיקומן האנכי (Y)
-        lines = {}
-        for w in valid_words:
-            cy = (w[1] + w[3]) / 2
-            # 6 פיקסלים זו סטייה סבירה כדי שמילים באותה שורה יקובצו יחד
-            line_key = int(cy // 6) * 6
-            if line_key not in lines:
-                lines[line_key] = []
-            lines[line_key].append(w)
-
-        # מערך שישמור את השיוך של כל מילה (0=ימין, 1=אמצע, 2=שמאל)
-        word_assignments = [] 
-
-        # 2. מעבר שורה אחר שורה וחיפוש "המרווח הכי גדול"
-        for cy in sorted(lines.keys()):
-            line_words = lines[cy]
-            # מיון המילים בשורה משמאל לימין כדי לבדוק מרווחים ביניהן
-            line_words.sort(key=lambda w: w[0])
-            
-            # מילים רחבות מאוד (כותרות שחוצות את הטורים) ישויכו לכל העמודות
-            wide_words = [w for w in line_words if (w[2] - w[0]) > width * 0.5]
-            for w in wide_words:
-                word_assignments.append({"word": w, "cols": [0, 1, 2]})
-            
-            # עבודה רק על מילים רגילות לטובת מציאת המרווחים
-            calc_words = [w for w in line_words if (w[2] - w[0]) <= width * 0.5]
-            if not calc_words:
+        # 2. בנייה מחדש של "שורות הטקסט" הלוגיות בדיוק כפי שהתוכנה קוראת אותן
+        lines_dict = {}
+        for w in words:
+            # מתעלמים ממילים בשוליים העליונים והתחתונים (כותרות עמוד וכו')
+            if w[1] < top_margin or w[3] > crop_height:
                 continue
-                
-            # מציאת המרווחים (Gaps) בין כל מילה למילה שאחריה באותה השורה
-            gaps = []
-            for i in range(len(calc_words) - 1):
-                w_left = calc_words[i]
-                w_right = calc_words[i+1]
-                gap_width = w_right[0] - w_left[2]
-                gap_center = (w_left[2] + w_right[0]) / 2
-                
-                # מרווח תקין בין טורים הוא לרוב מעל 12 פיקסלים (רווח רגיל בין מילים הוא קטן יותר)
-                if gap_width > 12: 
-                    gaps.append((gap_width, gap_center))
-                    
-            # מיון המרווחים מהגדול לקטן
-            gaps.sort(key=lambda x: x[0], reverse=True)
             
-            # גבולות ברירת מחדל אם אין מרווחים בשורה הזו
-            left_bound = width * 0.33
-            right_bound = width * 0.66
+            # מפתח השורה מורכב ממספר הבלוק ומספר השורה בתוך הבלוק
+            line_key = (w[5], w[6]) 
+            if line_key not in lines_dict:
+                lines_dict[line_key] = []
+            lines_dict[line_key].append(w)
+
+        # 3. ניתוח כל שורה בפני עצמה
+        regular_lines = []
+        shared_lines = []
+        
+        for key, w_list in lines_dict.items():
+            # מציאת גבולות השורה השלמה
+            x0 = min([w[0] for w in w_list])
+            x1 = max([w[2] for w in w_list])
+            y0 = min([w[1] for w in w_list])
+            y1 = max([w[3] for w in w_list])
+            line_width = x1 - x0
             
-            # אם מצאנו לפחות שני מרווחים גדולים - הם מייצגים את ההפרדה בין 3 הטורים
-            if len(gaps) >= 2:
-                top_2_gaps = [gaps[0][1], gaps[1][1]]
-                left_bound = min(top_2_gaps)
-                right_bound = max(top_2_gaps)
-            # אם מצאנו רק מרווח גדול אחד - הוא מפריד בין שני טורים בלבד באותה שורה
-            elif len(gaps) == 1:
-                gc = gaps[0][1]
-                if gc < width * 0.5:
-                    left_bound = gc # מרווח בין שמאל לאמצע
-                else:
-                    right_bound = gc # מרווח בין אמצע לימין
+            line_obj = {
+                "bbox": (x0, y0, x1, y1),
+                "x1": x1,  # *קצה ימני* של השורה - העוגן שלנו לזיהוי העמודה בעברית!
+                "width": line_width,
+                "words": w_list,
+                "col_idx": -1
+            }
+            
+            # אם השורה רחבה מאוד (מעל 45% מהדף) היא כנראה כותרת משותפת למספר טורים
+            if line_width > width * 0.45:
+                shared_lines.append(line_obj)
+            else:
+                regular_lines.append(line_obj)
 
-            # 3. שיוך סופי של המילים בשורה לטורים, על סמך הגבולות הספציפיים שמצאנו עבור השורה הזו!
-            for w in calc_words:
-                wcx = (w[0] + w[2]) / 2
-                if wcx > right_bound:
-                    word_assignments.append({"word": w, "cols": [0]}) # טור ימין
-                elif wcx < left_bound:
-                    word_assignments.append({"word": w, "cols": [2]}) # טור שמאל
-                else:
-                    word_assignments.append({"word": w, "cols": [1]}) # טור אמצע
+        if not regular_lines:
+            continue
 
-        # 4. שיוך התמונות
+        # 4. מציאת גבולות הימין האמיתיים של 3 הטורים בעמוד (K-Means Clustering)
+        # מכיוון שבעברית הקריאה מימין לשמאל, גם פסקה מתעקלת תישאר מיושרת לימין.
+        x1_values = [l["x1"] for l in regular_lines]
+        
+        # נקודות פתיחה משוערות של הקצה הימני ב-3 הטורים (ימין, אמצע, שמאל)
+        centers = [width * 0.95, width * 0.60, width * 0.25]
+        
+        for _ in range(10):
+            clusters = [[], [], []]
+            for x in x1_values:
+                idx = int(np.argmin([abs(x - c) for c in centers]))
+                clusters[idx].append(x)
+            
+            new_centers = [float(np.mean(c)) if c else centers[i] for i, c in enumerate(clusters)]
+            if new_centers == centers:
+                break
+            centers = new_centers
+            
+        # מיון מהגדול לקטן, כך ש-0 זה הטור הימני ביותר, 1 אמצע, 2 שמאלי
+        centers.sort(reverse=True)
+        
+        # 5. שיוך כל שורה לטור שלה לפי הקצה הימני שלה!
+        for line in regular_lines:
+            idx = int(np.argmin([abs(line["x1"] - c) for c in centers]))
+            line["col_idx"] = idx
+
+        # שיוך תמונות (לפי מרכז התמונה)
         page_dict = page.get_text("dict")
         images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
-        img_assignments = []
+        img_objects = []
         for img in images:
             ib = fitz.Rect(img["bbox"])
-            if ib.width > width * 0.5:
-                img_assignments.append({"bbox": ib, "cols": [0, 1, 2], "img": img})
+            if ib.width > width * 0.45 or ib.y0 < top_margin or ib.y1 > crop_height:
+                img_objects.append({"bbox": ib, "col_idx": -1, "img": img}) # תמונה משותפת
             else:
                 icx = (ib.x0 + ib.x1) / 2
-                if icx > width * 0.66:
-                    img_assignments.append({"bbox": ib, "cols": [0], "img": img})
-                elif icx < width * 0.33:
-                    img_assignments.append({"bbox": ib, "cols": [2], "img": img})
-                else:
-                    img_assignments.append({"bbox": ib, "cols": [1], "img": img})
+                idx = int(np.argmin([abs(icx - c) for c in centers]))
+                img_objects.append({"bbox": ib, "col_idx": idx, "img": img})
 
-        # 5. יצירת העמודים הסופיים
-        for col_idx in [0, 1, 2]:
-            my_words = [wa["word"] for wa in word_assignments if col_idx in wa["cols"]]
-            my_images = [ia for ia in img_assignments if col_idx in ia["cols"]]
+        # 6. יצירת העמודים הנקיים (1 לכל טור)
+        for target_col in [0, 1, 2]:
+            my_lines = [l for l in regular_lines if l["col_idx"] == target_col]
+            my_images = [img for img in img_objects if img["col_idx"] == target_col]
             
-            # בדיקה האם יש טקסט *בלעדי* לטור הזה. אם לא - נדלג עליו כדי לא לייצר עמודים לבנים
-            strict_words = [wa["word"] for wa in word_assignments if wa["cols"] == [col_idx]]
-            strict_images = [ia for ia in img_assignments if ia["cols"] == [col_idx]]
-            if not strict_words and not strict_images:
+            # אם הטור ריק לחלוטין בעמוד הזה, לא נייצר לו דף לבן
+            if not my_lines and not my_images:
                 continue
-
+                
             new_page = out_doc.new_page(width=width, height=height)
             new_page.show_pdf_page(new_page.rect, doc, page_num)
-
-            # טיפקס וירטואלי: מחיקת מילים שלא שייכות לטור הנוכחי
-            for wa in word_assignments:
-                if col_idx not in wa["cols"]:
-                    w = wa["word"]
-                    # מחיקה עם שוליים דקיקים (1.5) כדי לא לנגוס בניקוד של המילים השכנות שכן רלוונטיות
+            
+            # "טיפקס ברמת המילה" - מחיקה מדויקת של כל מילה ששייכת לטורים האחרים
+            other_lines = [l for l in regular_lines if l["col_idx"] != target_col]
+            for line in other_lines:
+                for w in line["words"]:
+                    # הוספת 1.5 פיקסלים למחיקה ודאית, מבלי להסתכן בדריסת הטור שלנו גם אם הם קרובים בזיגזג
                     erase_rect = fitz.Rect(w[0]-1.5, w[1]-1.5, w[2]+1.5, w[3]+1.5)
                     new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
-
+                    
             # מחיקת תמונות לא רלוונטיות
-            for ia in img_assignments:
-                if col_idx not in ia["cols"]:
-                    ib = ia["bbox"]
+            for img_obj in img_objects:
+                if img_obj["col_idx"] not in [-1, target_col]:
+                    ib = img_obj["bbox"]
                     erase_rect = fitz.Rect(ib.x0-2, ib.y0-2, ib.x1+2, ib.y1+2)
                     new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
 
-            # 6. ביצוע הגזירה (Crop)
-            # הרוחב יחושב אך ורק לפי הטקסט הבלעדי של הטור (strict_words) כדי שכותרת משותפת לא תרחיב את הטור יתר על המידה
-            x_coords = []
-            for w in strict_words: x_coords.extend([w[0], w[2]])
-            for ia in strict_images: x_coords.extend([ia["bbox"].x0, ia["bbox"].x1])
-
-            if x_coords:
-                min_x = min(x_coords)
-                max_x = max(x_coords)
-            elif my_words:
-                min_x = min([w[0] for w in my_words])
-                max_x = max([w[2] for w in my_words])
+            # 7. הגדרת החיתוך (Crop) לטור הזה בלבד
+            xs = []
+            ys = []
+            # לאיסוף הרוחב והגובה של הטור הנוכחי
+            for l in my_lines:
+                xs.extend([l["bbox"][0], l["bbox"][2]])
+                ys.extend([l["bbox"][1], l["bbox"][3]])
+            for img in my_images:
+                xs.extend([img["bbox"].x0, img["bbox"].x1])
+                ys.extend([img["bbox"].y0, img["bbox"].y1])
+                
+            if xs:
+                min_x, max_x = min(xs), max(xs)
+                
+                # בגובה, נתחשב גם בכותרות המשותפות אם קיימות, כדי שהן לא ייחתכו מהלמעלה/למטה של הטור
+                all_y = ys + [l["bbox"][1] for l in shared_lines] + [l["bbox"][3] for l in shared_lines]
+                min_y = min(all_y) if all_y else min(ys)
+                max_y = max(all_y) if all_y else max(ys)
+                
+                pad_x = 10
+                pad_y = 15
+                
+                crop_rect = fitz.Rect(
+                    max(0, min_x - pad_x),
+                    max(0, min_y - pad_y),
+                    min(width, max_x + pad_x),
+                    min(height, max_y + pad_y)
+                )
+                
+                if crop_rect.width > 30 and crop_rect.height > 30:
+                    new_page.set_cropbox(crop_rect)
+                    new_page.set_mediabox(crop_rect)
+                else:
+                    out_doc.delete_page(-1)
             else:
-                min_x = 0; max_x = width
-
-            y_coords = []
-            for w in my_words: y_coords.extend([w[1], w[3]])
-            for ia in my_images: y_coords.extend([ia["bbox"].y0, ia["bbox"].y1])
-
-            min_y = min(y_coords) if y_coords else top_margin
-            max_y = max(y_coords) if y_coords else crop_height
-
-            pad_x = 10
-            pad_y = 15
-            
-            crop_rect = fitz.Rect(
-                max(0, min_x - pad_x),
-                max(0, min_y - pad_y),
-                min(width, max_x + pad_x),
-                min(height, max_y + pad_y)
-            )
-
-            if crop_rect.width > 30 and crop_rect.height > 30:
-                new_page.set_cropbox(crop_rect)
-                new_page.set_mediabox(crop_rect)
-            else:
-                # הטור הזה נמצא ריק בפועל (למרות שהיה בו טקסט משותף כמו כותרת) - נמחק את העמוד
                 out_doc.delete_page(-1)
 
     out_doc.save(output_pdf_path)
