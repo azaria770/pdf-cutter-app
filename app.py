@@ -14,6 +14,10 @@ import datetime
 import requests 
 from bs4 import BeautifulSoup
 import subprocess
+import gc  # נוסף לטובת ניקוי זיכרון RAM אגרסיבי
+
+# מונע מ-OpenCV לפתוח תהליכים מקבילים שגורמים ל-Segmentation fault בשרתים מוגבלים
+cv2.setNumThreads(1)
 
 # --- הגדרות מערכת ---
 DEFAULT_START_ID = 72680
@@ -395,6 +399,8 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     np_arr_template = np.frombuffer(img_data, np.uint8)
     template = cv2.imdecode(np_arr_template, cv2.IMREAD_GRAYSCALE)
     if template is None: return False
+    
+    found = False
     for scale in np.linspace(0.4, 1.6, 12):
         width = int(template.shape[1] * scale)
         height = int(template.shape[0] * scale)
@@ -402,8 +408,11 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
         resized_template = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
         result = cv2.matchTemplate(img_array, resized_template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(result)
-        if max_val >= threshold: return True
-    return False
+        if max_val >= threshold: 
+            found = True
+            break
+            
+    return found
 
 def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_image_b64):
     doc = fitz.open(input_pdf_path)
@@ -412,12 +421,24 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
         pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
+        
         if start_page == -1:
-            if find_image_in_page(pix, start_image_b64): start_page = page_num
+            if find_image_in_page(pix, start_image_b64): 
+                start_page = page_num
+                
         if start_page != -1 and end_page == -1:
             if find_image_in_page(pix, end_image_b64):
                 end_page = page_num
+                # שחרור זיכרון מידי לפני יציאה מהלולאה
+                pix = None
+                page = None
                 break
+                
+        # שחרור זיכרון RAM אגרסיבי לאחר כל עמוד כדי למנוע קריסה
+        pix = None
+        page = None
+        gc.collect()
+
     if start_page != -1 and end_page != -1:
         new_doc = fitz.open()
         new_doc.insert_pdf(doc, from_page=start_page, to_page=end_page)
@@ -425,6 +446,7 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
         new_doc.close()
         doc.close()
         return True
+        
     doc.close()
     return False
 
@@ -448,12 +470,19 @@ def main():
         st.session_state.prev_upload_option = upload_option
         if "manual_files" in st.session_state:
             del st.session_state["manual_files"]
+        if "auto_pdf_processed" in st.session_state:
+            del st.session_state["auto_pdf_processed"]
     
     START_IMG, END_IMG = "start.png", "end.png"
 
     if upload_option == "שליפה אוטומטית (משכן שילה)":
-        with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
-            success, error_msg, target_title = prepare_auto_pdf()
+        # מניעת הורדה ועיבוד מחדש בכל לחיצה על כפתורי הממשק
+        if "auto_pdf_processed" not in st.session_state:
+            with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
+                success, error_msg, target_title = prepare_auto_pdf()
+                st.session_state["auto_pdf_processed"] = (success, error_msg, target_title)
+        else:
+            success, error_msg, target_title = st.session_state["auto_pdf_processed"]
         
         if success and os.path.exists(AUTO_REGULAR_PDF):
             st.success("✅ הקובץ מוכן עבורך!")
