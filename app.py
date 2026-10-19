@@ -13,8 +13,8 @@ import datetime
 import requests 
 from bs4 import BeautifulSoup
 import subprocess
-import gc  # נוסף לטובת ניקוי זיכרון RAM אגרסיבי
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,10 @@ DOWNLOAD_TIMEOUT = 120
 # start_v2.png מתאים לעיצוב הכותרת שהתחיל בתשפ"ז; start.png נשאר עבור גיליונות ישנים
 START_IMAGES = ("start.png", "start_v2.png")
 END_IMAGE = "end.png"
+FULL_RENDER_SCALE = 1.2
+COARSE_RENDER_SCALE = FULL_RENDER_SCALE / 2
+# סף מקל לסריקה המהירה כדי לא לפספס עמודי סמן; ההכרעה נעשית ברזולוציה מלאה
+COARSE_THRESHOLD = 0.65
 
 # --- פונקציות מסד נתונים וזמן ---
 
@@ -206,9 +210,7 @@ def prepare_auto_pdf():
             os.remove(downloaded_path)
 
     if success:
-        convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
-        split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
-        convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
+        build_pdf_variants(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF, AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         
         if should_scrape or last_title != original_filename:
             save_config({
@@ -366,17 +368,18 @@ def split_pdf_to_columns(input_pdf_path, output_pdf_path):
             new_page.show_pdf_page(new_page.rect, doc, page_num)
 
             # 5. טיפקס כירורגי למילים זרות
+            # כל המלבנים נכתבים ב-commit אחד; draw_rect נפרד לכל מילה איטי מאוד
+            shape = new_page.new_shape()
             for other_idx in [0, 1, 2]:
                 if other_idx == col_idx:
                     continue
                 for w in col_words[other_idx]:
                     # מחיקה עם קיזוז קל (0.5 פיקסל פנימה) כדי לא לנגוס בניקוד של מילים סמוכות מהטור שלנו
-                    erase_rect = fitz.Rect(w[0]+0.5, w[1], w[2]-0.5, w[3])
-                    new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+                    shape.draw_rect(fitz.Rect(w[0]+0.5, w[1], w[2]-0.5, w[3]))
                 for img in img_cols[other_idx]:
-                    ib = fitz.Rect(img["bbox"])
-                    erase_rect = fitz.Rect(ib.x0, ib.y0, ib.x1, ib.y1)
-                    new_page.draw_rect(erase_rect, color=(1,1,1), fill=(1,1,1))
+                    shape.draw_rect(fitz.Rect(img["bbox"]))
+            shape.finish(color=(1,1,1), fill=(1,1,1))
+            shape.commit()
 
             # 6. הגדרת רוחב הטור בדיוק לפי "השורה הארוכה ביותר" בטור עצמו
             # איסוף כל נקודות ה-X הרלוונטיות
@@ -437,29 +440,59 @@ def convert_pdf_to_bw(input_path, output_path):
         shutil.copy(input_path, output_path)
         print(f"Ghostscript error: {e}")
 
-def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
-    img_array = np.frombuffer(page_pixmap.samples, dtype=np.uint8).reshape(page_pixmap.h, page_pixmap.w, page_pixmap.n)
-    if page_pixmap.n >= 3:
-        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    img_data = base64.b64decode(template_b64)
-    np_arr_template = np.frombuffer(img_data, np.uint8)
-    template = cv2.imdecode(np_arr_template, cv2.IMREAD_GRAYSCALE)
-    if template is None: return False
-    
-    found = False
+def build_pdf_variants(regular, regular_bw, cut, cut_bw):
+    split_pdf_to_columns(regular, cut)
+    # שתי המרות Ghostscript הן תהליכים נפרדים, ולכן רצות במקביל באמת
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        jobs = [pool.submit(convert_pdf_to_bw, regular, regular_bw),
+                pool.submit(convert_pdf_to_bw, cut, cut_bw)]
+        for job in jobs:
+            job.result()
+
+def decode_template(template_b64):
+    return cv2.imdecode(np.frombuffer(base64.b64decode(template_b64), np.uint8), cv2.IMREAD_GRAYSCALE)
+
+def template_scales(template):
+    """מכין מראש את כל גדלי התבנית כדי לא לחזור על הפענוח והשינוי בכל עמוד."""
+    if template is None:
+        return []
+    resized = []
     # 1.0 נוסף לסולם המקורי כדי לזהות סמנים שנחתכו ברזולוציית הסריקה
     for scale in np.append(1.0, np.linspace(0.4, 1.6, 12)):
         width = int(template.shape[1] * scale)
         height = int(template.shape[0] * scale)
-        if height == 0 or width == 0 or height > img_array.shape[0] or width > img_array.shape[1]: continue
-        resized_template = cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA)
+        if height and width:
+            resized.append(cv2.resize(template, (width, height), interpolation=cv2.INTER_AREA))
+    return resized
+
+def find_image_in_page(img_array, scaled_templates, threshold=0.7):
+    return best_match(img_array, scaled_templates, threshold) >= threshold
+
+def best_match(img_array, scaled_templates, stop_at=1.0):
+    best = 0.0
+    for resized_template in scaled_templates:
+        if resized_template.shape[0] > img_array.shape[0] or resized_template.shape[1] > img_array.shape[1]: continue
         result = cv2.matchTemplate(img_array, resized_template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-        if max_val >= threshold: 
-            found = True
+        best = max(best, cv2.minMaxLoc(result)[1])
+        if best >= stop_at:
             break
-            
-    return found
+    return best
+
+def shrink_templates(scaled_templates):
+    return [cv2.resize(t, (max(1, t.shape[1] // 2), max(1, t.shape[0] // 2)), interpolation=cv2.INTER_AREA)
+            for t in scaled_templates]
+
+def page_matches(page, coarse_templates, full_templates, threshold=0.7):
+    """סריקה מהירה בחצי רזולוציה, ואימות ברזולוציה מלאה רק לעמודים מועמדים."""
+    if best_match(render_gray(page, COARSE_RENDER_SCALE), coarse_templates, COARSE_THRESHOLD) < COARSE_THRESHOLD:
+        return False
+    return find_image_in_page(render_gray(page, FULL_RENDER_SCALE), full_templates, threshold)
+
+def render_gray(page, scale):
+    pix = page.get_pixmap(matrix=fitz.Matrix(scale, scale))
+    img_array = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+    # רינדור ישיר באפור נותן ציוני התאמה מעט נמוכים יותר, שמפילים את start.png מתחת לסף
+    return cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
 
 def marker_images_exist():
     return all(os.path.exists(path) for path in (*START_IMAGES, END_IMAGE))
@@ -472,29 +505,25 @@ def load_marker_images():
     return start_b64s, end_b64
 
 def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_images_b64, end_image_b64):
+    start_templates = [template_scales(decode_template(b64)) for b64 in start_images_b64]
+    end_templates = template_scales(decode_template(end_image_b64))
+    coarse_start = [shrink_templates(t) for t in start_templates]
+    coarse_end = shrink_templates(end_templates)
+
     doc = fitz.open(input_pdf_path)
     start_page = -1
     end_page = -1
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
-        
+
         if start_page == -1:
-            if any(find_image_in_page(pix, start_b64) for start_b64 in start_images_b64):
+            if any(page_matches(page, coarse, full) for coarse, full in zip(coarse_start, start_templates)):
                 start_page = page_num
-                
+
         if start_page != -1 and end_page == -1:
-            if find_image_in_page(pix, end_image_b64):
+            if page_matches(page, coarse_end, end_templates):
                 end_page = page_num
-                # שחרור זיכרון מידי לפני יציאה מהלולאה
-                pix = None
-                page = None
                 break
-                
-        # שחרור זיכרון RAM אגרסיבי לאחר כל עמוד כדי למנוע קריסה
-        pix = None
-        page = None
-        gc.collect()
 
     if start_page != -1 and end_page != -1:
         new_doc = fitz.open()
@@ -601,9 +630,7 @@ def main():
                         output_cut_bw = input_path.replace(".pdf", "_cut_bw.pdf")
                         
                         if extract_pdf_by_images(input_path, output_regular, start_b64s, end_b64):
-                            convert_pdf_to_bw(output_regular, output_regular_bw)
-                            split_pdf_to_columns(output_regular, output_cut)
-                            convert_pdf_to_bw(output_cut, output_cut_bw)
+                            build_pdf_variants(output_regular, output_regular_bw, output_cut, output_cut_bw)
                             
                             safe_manual_name = uploaded_file.name
                             if not safe_manual_name.lower().endswith('.pdf'):
@@ -650,9 +677,7 @@ def main():
                             output_cut_bw = "temp_cut_bw_drive.pdf"
                             
                             if extract_pdf_by_images(downloaded_path, output_regular, start_b64s, end_b64):
-                                convert_pdf_to_bw(output_regular, output_regular_bw)
-                                split_pdf_to_columns(output_regular, output_cut)
-                                convert_pdf_to_bw(output_cut, output_cut_bw)
+                                build_pdf_variants(output_regular, output_regular_bw, output_cut, output_cut_bw)
                                 
                                 st.session_state["manual_files"] = {
                                     "reg_col": output_regular,
