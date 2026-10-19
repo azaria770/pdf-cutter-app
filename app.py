@@ -226,65 +226,19 @@ def prepare_auto_pdf():
 
 # --- פונקציות עיבוד תצוגה וממשק מתקדם ---
 
-def display_pdf(file_path):
-    with open(file_path, "rb") as f:
-        base64_pdf = base64.b64encode(f.read()).decode('utf-8')
-    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="800px" type="application/pdf" style="border: 1px solid #ccc; border-radius: 8px;"></iframe>'
-    st.markdown(pdf_display, unsafe_allow_html=True)
-
 def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color, cut_bw, key_prefix):
-    if f"{key_prefix}_format" not in st.session_state:
-        st.session_state[f"{key_prefix}_format"] = None
-    if f"{key_prefix}_layout" not in st.session_state:
-        st.session_state[f"{key_prefix}_layout"] = None
-
-    st.write("### 1. בחר פורמט צבע:")
+    st.write("### בחר פורמט להורדה:")
     col1, col2 = st.columns(2)
-    
-    if col1.button("🎨 צבעוני", width="stretch", key=f"{key_prefix}_btn_color"):
-        st.session_state[f"{key_prefix}_format"] = "color"
-        st.session_state[f"{key_prefix}_layout"] = None
-    
-    if col2.button("🖨️ שחור לבן", width="stretch", key=f"{key_prefix}_btn_bw"):
-        st.session_state[f"{key_prefix}_format"] = "bw"
-        st.session_state[f"{key_prefix}_layout"] = None
-
-    fmt = st.session_state[f"{key_prefix}_format"]
-    
-    if fmt:
-        st.write("### 2. בחר פריסה:")
-        layout_col1, layout_col2 = st.columns(2)
-        
-        if layout_col1.button("📄 מסמך רגיל", width="stretch", key=f"{key_prefix}_btn_reg"):
-            st.session_state[f"{key_prefix}_layout"] = "regular"
-        
-        if layout_col2.button("✂️ חתוך לטורים (לקריאה דיגיטלית)", width="stretch", key=f"{key_prefix}_btn_cut"):
-            st.session_state[f"{key_prefix}_layout"] = "cut"
-
-        lyt = st.session_state[f"{key_prefix}_layout"]
-        if lyt:
-            if fmt == "color" and lyt == "regular":
-                target_file = regular_color
-                dl_name = base_filename
-            elif fmt == "bw" and lyt == "regular":
-                target_file = regular_bw
-                dl_name = base_filename.replace(".pdf", " - שחור לבן.pdf")
-            elif fmt == "color" and lyt == "cut":
-                target_file = cut_color
-                dl_name = base_filename.replace(".pdf", " - חתוך לטורים.pdf")
-            elif fmt == "bw" and lyt == "cut":
-                target_file = cut_bw
-                dl_name = base_filename.replace(".pdf", " - שחור לבן - חתוך לטורים.pdf")
-
-            if os.path.exists(target_file):
-                st.write("### 3. בחר פעולה:")
-                act_col1, act_col2 = st.columns(2)
-                with open(target_file, "rb") as f:
-                    act_col1.download_button("📥 הורד קובץ", f, dl_name, "application/pdf", width="stretch", key=f"{key_prefix}_btn_dl")
-                if act_col2.button("👁️ תצוגה באתר", width="stretch", key=f"{key_prefix}_btn_view"):
-                    display_pdf(target_file)
-            else:
-                st.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
+    options = (
+        (col1, "🎨 צבעוני", regular_color, base_filename, "color"),
+        (col2, "🖨️ שחור לבן", regular_bw, base_filename.replace(".pdf", " - שחור לבן.pdf"), "bw"),
+    )
+    for col, label, target_file, dl_name, key in options:
+        if os.path.exists(target_file):
+            with open(target_file, "rb") as f:
+                col.download_button(label, f, dl_name, "application/pdf", width="stretch", key=f"{key_prefix}_dl_{key}")
+        else:
+            col.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
 
 
 def split_pdf_to_columns(input_pdf_path, output_pdf_path):
