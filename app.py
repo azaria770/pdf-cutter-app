@@ -7,7 +7,6 @@ import tempfile
 import streamlit as st
 import gdown
 import re
-import cloudscraper
 import json
 import urllib.parse
 import datetime
@@ -15,16 +14,27 @@ import requests
 from bs4 import BeautifulSoup
 import subprocess
 import gc  # נוסף לטובת ניקוי זיכרון RAM אגרסיבי
+import logging
+
+logger = logging.getLogger(__name__)
 
 # מונע מ-OpenCV לפתוח תהליכים מקבילים שגורמים ל-Segmentation fault בשרתים מוגבלים
 cv2.setNumThreads(1)
 
 # --- הגדרות מערכת ---
-DEFAULT_START_ID = 72680
+SOURCE_URL = (
+    "https://sites.google.com/view/mishkan-shilo/"
+    "%D7%A2%D7%9E%D7%95%D7%AA%D7%AA-%D7%9E%D7%A9%D7%9B%D7%9F-%D7%A9%D7%99%D7%9C%D7%94"
+)
 AUTO_REGULAR_PDF = "auto_regular_document.pdf"
 AUTO_REGULAR_BW_PDF = "auto_regular_document_bw.pdf" 
 AUTO_CUT_PDF = "auto_cut_document.pdf"
 AUTO_CUT_BW_PDF = "auto_cut_document_bw.pdf" 
+REQUEST_TIMEOUT = 30
+DOWNLOAD_TIMEOUT = 120
+# start_v2.png מתאים לעיצוב הכותרת שהתחיל בתשפ"ז; start.png נשאר עבור גיליונות ישנים
+START_IMAGES = ("start.png", "start_v2.png")
+END_IMAGE = "end.png"
 
 # --- פונקציות מסד נתונים וזמן ---
 
@@ -35,7 +45,7 @@ def get_config():
         if 'JSONBIN_BIN_ID' in st.secrets and 'JSONBIN_API_KEY' in st.secrets:
             url = f"https://api.jsonbin.io/v3/b/{st.secrets['JSONBIN_BIN_ID']}"
             headers = {'X-Master-Key': st.secrets['JSONBIN_API_KEY']}
-            req = requests.get(url, headers=headers)
+            req = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
             if req.status_code == 200:
                 return req.json().get('record', {})
     except Exception as e:
@@ -51,7 +61,7 @@ def save_config(data):
                 'Content-Type': 'application/json',
                 'X-Master-Key': st.secrets['JSONBIN_API_KEY']
             }
-            requests.put(url, json=data, headers=headers)
+            requests.put(url, json=data, headers=headers, timeout=REQUEST_TIMEOUT)
             get_config.clear() 
     except Exception as e:
         st.error(f"שגיאה בשמירה למסד הנתונים: {e}")
@@ -66,17 +76,77 @@ def get_next_saturday_1600(from_date):
 
 # --- פונקציית האוטומציה המרכזית ---
 
+def fetch_latest_drive_id():
+    """שולף את קישור הגיליון בעל המספר הגבוה ביותר, ומדלג על קישורי התפריט."""
+    response = requests.get(SOURCE_URL, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    soup = BeautifulSoup(response.text, "html.parser")
+    latest_issue, latest_drive_id = -1, None
+    for link in soup.select("a[href]"):
+        url = urllib.parse.urlparse(link["href"])
+        if url.hostname != "drive.google.com":
+            continue
+        drive_match = re.fullmatch(r"/file/d/([a-zA-Z0-9_-]+)(?:/view|/preview)?/?", url.path)
+        issue_match = re.search(r"גיליון משכן שילה\s+(\d+)", link.get_text(" ", strip=True))
+        if drive_match and issue_match and int(issue_match.group(1)) > latest_issue:
+            latest_issue, latest_drive_id = int(issue_match.group(1)), drive_match.group(1)
+    if latest_drive_id:
+        return latest_drive_id
+    raise ValueError("לא נמצא קישור תקין לגיליון בעמוד משכן שילה.")
+
+
+def _download_drive_file_direct(file_id):
+    """הורדה ישירה מ-drive.usercontent, כולל מעבר על דף אישור סריקת הווירוסים."""
+    with requests.Session() as sess:
+        res = sess.get(
+            "https://drive.usercontent.google.com/download",
+            params={"id": file_id, "export": "download", "confirm": "t"},
+            stream=True, timeout=DOWNLOAD_TIMEOUT,
+        )
+        res.raise_for_status()
+        if "text/html" in res.headers.get("Content-Type", ""):
+            form = BeautifulSoup(res.text, "html.parser").find("form", id="download-form")
+            if not form or not form.get("action"):
+                raise ValueError("גוגל דרייב חסם את ההורדה (ייתכן שהקובץ אינו משותף לציבור או שחרג ממכסת ההורדות).")
+            params = {i["name"]: i.get("value", "") for i in form.find_all("input") if i.get("name")}
+            res = sess.get(form["action"], params=params, stream=True, timeout=DOWNLOAD_TIMEOUT)
+            res.raise_for_status()
+            if "text/html" in res.headers.get("Content-Type", ""):
+                raise ValueError("גוגל דרייב חסם את ההורדה (ייתכן שחרג ממכסת ההורדות).")
+
+        disposition = res.headers.get("Content-Disposition", "")
+        name_match = (re.search(r"filename\*=UTF-8''([^;]+)", disposition)
+                      or re.search(r'filename="([^"]+)"', disposition))
+        filename = os.path.basename(urllib.parse.unquote(name_match.group(1))) if name_match else ""
+        path = os.path.join(tempfile.mkdtemp(), filename or f"{file_id}.pdf")
+        with open(path, "wb") as f:
+            for chunk in res.iter_content(chunk_size=1 << 20):
+                f.write(chunk)
+    return path
+
+
+def download_drive_file(file_id):
+    """מוריד קובץ מגוגל דרייב בעזרת gdown, עם מעבר להורדה ישירה אם gdown נכשל."""
+    try:
+        path = gdown.download(id=file_id, quiet=False, timeout=DOWNLOAD_TIMEOUT)
+        if path:
+            return path
+    except gdown.exceptions.FileURLRetrievalError:
+        logger.warning("gdown failed for %s, falling back to direct download", file_id, exc_info=True)
+    return _download_drive_file_direct(file_id)
+
+
 def prepare_auto_pdf():
     config = get_config()
-    last_post_id = config.get("last_post_id", DEFAULT_START_ID)
     last_drive_id = config.get("last_drive_id", None)
     last_check_str = config.get("last_check_time")
     last_title = config.get("last_title", "גיליון משכן שילה") 
+    source_changed = config.get("source_url") != SOURCE_URL
 
     now = datetime.datetime.now()
     should_scrape = False
 
-    if not last_check_str:
+    if source_changed or not last_drive_id or not os.path.exists(AUTO_REGULAR_PDF) or not last_check_str:
         should_scrape = True
     else:
         last_check = datetime.datetime.fromisoformat(last_check_str)
@@ -84,92 +154,68 @@ def prepare_auto_pdf():
         if now >= next_check:
             should_scrape = True
 
-    target_post_id = last_post_id
     target_drive_id = last_drive_id
     found_new = False
 
-    scraper = cloudscraper.create_scraper(browser={'browser': 'chrome', 'platform': 'windows', 'desktop': True})
-    
     if should_scrape:
-        cat_url = "https://kav.meorot.net/category/%d7%a2%d7%9c%d7%95%d7%a0%d7%99-%d7%a9%d7%91%d7%aa/%d7%9e%d7%a9%d7%9b%d7%9f-%d7%a9%d7%99%d7%9c%d7%94/"
-        cat_res = scraper.get(cat_url)
-        
-        if cat_res.status_code == 200:
-            soup = BeautifulSoup(cat_res.text, "html.parser")
-            post_link = soup.select_one("h3 a, h2 a")
-            
-            if post_link:
-                url = post_link["href"]
-                id_match = re.search(r'kav\.meorot\.net/(\d+)', url)
-                if id_match:
-                    scraped_post_id = int(id_match.group(1))
-                    
-                    if scraped_post_id > last_post_id:
-                        post_res = scraper.get(url)
-                        if post_res.status_code == 200:
-                            drive_patterns = [
-                                r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', 
-                                r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)'
-                            ]
-                            for pattern in drive_patterns:
-                                match = re.search(pattern, post_res.text)
-                                if match:
-                                    target_drive_id = match.group(1)
-                                    target_post_id = scraped_post_id
-                                    found_new = True
-                                    break
+        try:
+            target_drive_id = fetch_latest_drive_id()
+        except (requests.RequestException, ValueError) as e:
+            return False, f"שגיאה בשליפת הגיליון מאתר משכן שילה: {e}", None
+        found_new = source_changed or target_drive_id != last_drive_id
+        last_check_str = now.isoformat()
 
     if not found_new and os.path.exists(AUTO_REGULAR_PDF):
         if not os.path.exists(AUTO_REGULAR_BW_PDF): convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
         if not os.path.exists(AUTO_CUT_PDF): split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
         if not os.path.exists(AUTO_CUT_BW_PDF): convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
+        if should_scrape:
+            save_config({
+                **config,
+                "source_url": SOURCE_URL,
+                "last_check_time": last_check_str
+            })
         return True, None, last_title
 
     if not target_drive_id:
-        post_res = scraper.get(f"https://kav.meorot.net/{target_post_id}/")
-        if post_res.status_code == 200:
-            drive_patterns = [r'https://drive\.google\.com/file/d/([a-zA-Z0-9_-]+)', r'https%3A%2F%2Fdrive\.google\.com%2Ffile%2Fd%2F([a-zA-Z0-9_-]+)']
-            for pattern in drive_patterns:
-                match = re.search(pattern, post_res.text)
-                if match:
-                    target_drive_id = match.group(1)
-                    break
-                    
-    if not target_drive_id:
-        return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בפוסט.", None
+        return False, "לא הצלחנו לאתר קישור תקין לגוגל דרייב בעמוד משכן שילה.", None
 
-    downloaded_path = gdown.download(id=target_drive_id, quiet=False)
-    
-    if not downloaded_path:
-        return False, "שגיאה בהורדת הקובץ מגוגל דרייב.", None
+    downloaded_path = None
+    try:
+        try:
+            downloaded_path = download_drive_file(target_drive_id)
+        except (requests.RequestException, ValueError) as e:
+            return False, f"שגיאה בהורדת הקובץ מגוגל דרייב: {e}", None
 
-    original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
+        if not downloaded_path:
+            return False, "שגיאה בהורדת הקובץ מגוגל דרייב.", None
 
-    if os.path.getsize(downloaded_path) < 100000:
-        if os.path.exists(downloaded_path): os.remove(downloaded_path)
-        return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.", None
+        original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
 
-    START_IMG, END_IMG = "start.png", "end.png"
-    if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-        if os.path.exists(downloaded_path): os.remove(downloaded_path)
-        return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת.", None
+        if os.path.getsize(downloaded_path) < 100000:
+            return False, "הקובץ שהורד קטן מדי! נראה שגוגל דרייב חסם את ההורדה.", None
 
-    with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
-    with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
+        if not marker_images_exist():
+            return False, "שגיאה: קבצי תמונות החיתוך חסרים בשרת.", None
 
-    success = extract_pdf_by_images(downloaded_path, AUTO_REGULAR_PDF, start_b64, end_b64)
-    if os.path.exists(downloaded_path): os.remove(downloaded_path)
+        start_b64s, end_b64 = load_marker_images()
+
+        success = extract_pdf_by_images(downloaded_path, AUTO_REGULAR_PDF, start_b64s, end_b64)
+    finally:
+        if isinstance(downloaded_path, str) and os.path.exists(downloaded_path):
+            os.remove(downloaded_path)
 
     if success:
         convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
         split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
         convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         
-        if found_new or last_title != original_filename:
+        if should_scrape or last_title != original_filename:
             save_config({
-                "last_post_id": target_post_id,
+                **config,
+                "source_url": SOURCE_URL,
                 "last_drive_id": target_drive_id,
-                "last_check_time": last_check_str if not found_new else now.isoformat(),
+                "last_check_time": last_check_str,
                 "last_title": original_filename
             })
         return True, None, original_filename
@@ -193,11 +239,11 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
     st.write("### 1. בחר פורמט צבע:")
     col1, col2 = st.columns(2)
     
-    if col1.button("🎨 צבעוני", use_container_width=True, key=f"{key_prefix}_btn_color"):
+    if col1.button("🎨 צבעוני", width="stretch", key=f"{key_prefix}_btn_color"):
         st.session_state[f"{key_prefix}_format"] = "color"
         st.session_state[f"{key_prefix}_layout"] = None
     
-    if col2.button("🖨️ שחור לבן", use_container_width=True, key=f"{key_prefix}_btn_bw"):
+    if col2.button("🖨️ שחור לבן", width="stretch", key=f"{key_prefix}_btn_bw"):
         st.session_state[f"{key_prefix}_format"] = "bw"
         st.session_state[f"{key_prefix}_layout"] = None
 
@@ -207,10 +253,10 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
         st.write("### 2. בחר פריסה:")
         layout_col1, layout_col2 = st.columns(2)
         
-        if layout_col1.button("📄 מסמך רגיל", use_container_width=True, key=f"{key_prefix}_btn_reg"):
+        if layout_col1.button("📄 מסמך רגיל", width="stretch", key=f"{key_prefix}_btn_reg"):
             st.session_state[f"{key_prefix}_layout"] = "regular"
         
-        if layout_col2.button("✂️ חתוך לטורים (לקריאה דיגיטלית)", use_container_width=True, key=f"{key_prefix}_btn_cut"):
+        if layout_col2.button("✂️ חתוך לטורים (לקריאה דיגיטלית)", width="stretch", key=f"{key_prefix}_btn_cut"):
             st.session_state[f"{key_prefix}_layout"] = "cut"
 
         lyt = st.session_state[f"{key_prefix}_layout"]
@@ -232,8 +278,8 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
                 st.write("### 3. בחר פעולה:")
                 act_col1, act_col2 = st.columns(2)
                 with open(target_file, "rb") as f:
-                    act_col1.download_button("📥 הורד קובץ", f, dl_name, "application/pdf", use_container_width=True, key=f"{key_prefix}_btn_dl")
-                if act_col2.button("👁️ תצוגה באתר", use_container_width=True, key=f"{key_prefix}_btn_view"):
+                    act_col1.download_button("📥 הורד קובץ", f, dl_name, "application/pdf", width="stretch", key=f"{key_prefix}_btn_dl")
+                if act_col2.button("👁️ תצוגה באתר", width="stretch", key=f"{key_prefix}_btn_view"):
                     display_pdf(target_file)
             else:
                 st.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
@@ -401,7 +447,8 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
     if template is None: return False
     
     found = False
-    for scale in np.linspace(0.4, 1.6, 12):
+    # 1.0 נוסף לסולם המקורי כדי לזהות סמנים שנחתכו ברזולוציית הסריקה
+    for scale in np.append(1.0, np.linspace(0.4, 1.6, 12)):
         width = int(template.shape[1] * scale)
         height = int(template.shape[0] * scale)
         if height == 0 or width == 0 or height > img_array.shape[0] or width > img_array.shape[1]: continue
@@ -414,7 +461,17 @@ def find_image_in_page(page_pixmap, template_b64, threshold=0.7):
             
     return found
 
-def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_image_b64):
+def marker_images_exist():
+    return all(os.path.exists(path) for path in (*START_IMAGES, END_IMAGE))
+
+def load_marker_images():
+    start_b64s = []
+    for path in START_IMAGES:
+        with open(path, "rb") as f: start_b64s.append(base64.b64encode(f.read()))
+    with open(END_IMAGE, "rb") as f: end_b64 = base64.b64encode(f.read())
+    return start_b64s, end_b64
+
+def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_images_b64, end_image_b64):
     doc = fitz.open(input_pdf_path)
     start_page = -1
     end_page = -1
@@ -423,7 +480,7 @@ def extract_pdf_by_images(input_pdf_path, output_pdf_path, start_image_b64, end_
         pix = page.get_pixmap(matrix=fitz.Matrix(1.2, 1.2))
         
         if start_page == -1:
-            if find_image_in_page(pix, start_image_b64): 
+            if any(find_image_in_page(pix, start_b64) for start_b64 in start_images_b64):
                 start_page = page_num
                 
         if start_page != -1 and end_page == -1:
@@ -473,16 +530,17 @@ def main():
         if "auto_pdf_processed" in st.session_state:
             del st.session_state["auto_pdf_processed"]
     
-    START_IMG, END_IMG = "start.png", "end.png"
-
     if upload_option == "שליפה אוטומטית (משכן שילה)":
         # מניעת הורדה ועיבוד מחדש בכל לחיצה על כפתורי הממשק
         if "auto_pdf_processed" not in st.session_state:
             with st.spinner("מוודא ומכין את הגיליון העדכני ביותר..."):
-                success, error_msg, target_title = prepare_auto_pdf()
-                st.session_state["auto_pdf_processed"] = (success, error_msg, target_title)
-        else:
-            success, error_msg, target_title = st.session_state["auto_pdf_processed"]
+                try:
+                    result = prepare_auto_pdf()
+                except Exception as e:
+                    logger.exception("Automatic PDF preparation failed")
+                    result = (False, f"אירעה שגיאה בהכנת הגיליון: {e}", None)
+                st.session_state["auto_pdf_processed"] = result
+        success, error_msg, target_title = st.session_state["auto_pdf_processed"]
         
         if success and os.path.exists(AUTO_REGULAR_PDF):
             st.success("✅ הקובץ מוכן עבורך!")
@@ -504,7 +562,10 @@ def main():
             )
 
         else:
-            st.error(error_msg)
+            st.error(error_msg or "הקובץ המעובד לא נמצא בשרת.")
+            if st.button("נסה שוב", icon=":material/refresh:", key="auto_retry"):
+                del st.session_state["auto_pdf_processed"]
+                st.rerun()
 
     else:
         uploaded_file = None
@@ -516,14 +577,13 @@ def main():
             manual_link = st.text_input("הדבק כאן קישור שיתוף ל-PDF מ-Google Drive:")
             
         if st.button("הפעל חיתוך ועיבוד ידני"):
-            if not os.path.exists(START_IMG) or not os.path.exists(END_IMG):
-                st.error("שגיאה: קבצי התמונות (start.png / end.png) חסרים.")
+            if not marker_images_exist():
+                st.error(f"שגיאה: קבצי התמונות ({' / '.join((*START_IMAGES, END_IMAGE))}) חסרים.")
                 return
 
             with st.spinner("מבצע משיכה, חיתוך והכנת הטורים..."):
                 try:
-                    with open(START_IMG, "rb") as f: start_b64 = base64.b64encode(f.read())
-                    with open(END_IMG, "rb") as f: end_b64 = base64.b64encode(f.read())
+                    start_b64s, end_b64 = load_marker_images()
 
                     input_path = ""
                     
@@ -540,7 +600,7 @@ def main():
                         output_cut = input_path.replace(".pdf", "_cut.pdf")
                         output_cut_bw = input_path.replace(".pdf", "_cut_bw.pdf")
                         
-                        if extract_pdf_by_images(input_path, output_regular, start_b64, end_b64):
+                        if extract_pdf_by_images(input_path, output_regular, start_b64s, end_b64):
                             convert_pdf_to_bw(output_regular, output_regular_bw)
                             split_pdf_to_columns(output_regular, output_cut)
                             convert_pdf_to_bw(output_cut, output_cut_bw)
@@ -574,7 +634,7 @@ def main():
                             st.warning("הקישור לא תקין או לא מכיל מזהה (ID).")
                             return
                             
-                        downloaded_path = gdown.download(id=file_id, quiet=False)
+                        downloaded_path = download_drive_file(file_id)
                         if downloaded_path:
                             original_filename = urllib.parse.unquote(os.path.basename(downloaded_path))
                             
@@ -589,7 +649,7 @@ def main():
                             output_cut = "temp_cut_drive.pdf"
                             output_cut_bw = "temp_cut_bw_drive.pdf"
                             
-                            if extract_pdf_by_images(downloaded_path, output_regular, start_b64, end_b64):
+                            if extract_pdf_by_images(downloaded_path, output_regular, start_b64s, end_b64):
                                 convert_pdf_to_bw(output_regular, output_regular_bw)
                                 split_pdf_to_columns(output_regular, output_cut)
                                 convert_pdf_to_bw(output_cut, output_cut_bw)
