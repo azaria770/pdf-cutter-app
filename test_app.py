@@ -52,10 +52,7 @@ class PrepareAutoPdfTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.directory = Path(temp.name)
-        for name in (
-            "AUTO_REGULAR_PDF", "AUTO_REGULAR_BW_PDF",
-            "AUTO_CUT_PDF", "AUTO_CUT_BW_PDF",
-        ):
+        for name in ("AUTO_REGULAR_PDF", "AUTO_REGULAR_BW_PDF"):
             self.mock_attribute(name, str(self.directory / f"{name}.pdf"))
             Path(getattr(app, name)).write_bytes(b"cached")
 
@@ -71,7 +68,6 @@ class PrepareAutoPdfTests(unittest.TestCase):
         self.download = self.mock_attribute("gdown.download", Mock())
         self.extract = self.mock_attribute("extract_pdf_by_images", Mock(return_value=True))
         self.convert = self.mock_attribute("convert_pdf_to_bw", Mock())
-        self.split = self.mock_attribute("split_pdf_to_columns", Mock())
 
     def mock_attribute(self, name, value):
         patcher = patch(f"app.{name}", value)
@@ -103,8 +99,7 @@ class PrepareAutoPdfTests(unittest.TestCase):
         self.assertEqual(saved["last_drive_id"], "existing")
         self.assertEqual(saved["last_title"], "new.pdf")
         self.extract.assert_called_once()
-        self.assertEqual(self.convert.call_count, 2)
-        self.split.assert_called_once()
+        self.convert.assert_called_once()
 
     def test_unchanged_weekly_check_updates_timestamp_without_redownloading(self):
         self.config["last_check_time"] = "2020-01-01T10:00:00"
