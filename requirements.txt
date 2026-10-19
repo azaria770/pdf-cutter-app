@@ -1,8 +1,7 @@
-streamlit==1.60.0
-PyMuPDF==1.28.2
-opencv-python-headless==4.14.0.94
-numpy==2.4.6
-gdown==6.4.2
-requests==2.34.2
-beautifulsoup4==4.15.0
-
+streamlit
+PyMuPDF
+opencv-python-headless
+numpy
+gdown
+requests
+beautifulsoup4
