@@ -14,7 +14,6 @@ import requests
 from bs4 import BeautifulSoup
 import subprocess
 import logging
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +27,6 @@ SOURCE_URL = (
 )
 AUTO_REGULAR_PDF = "auto_regular_document.pdf"
 AUTO_REGULAR_BW_PDF = "auto_regular_document_bw.pdf" 
-AUTO_CUT_PDF = "auto_cut_document.pdf"
-AUTO_CUT_BW_PDF = "auto_cut_document_bw.pdf" 
 REQUEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = 120
 # start_v2.png מתאים לעיצוב הכותרת שהתחיל בתשפ"ז; start.png נשאר עבור גיליונות ישנים
@@ -171,8 +168,6 @@ def prepare_auto_pdf():
 
     if not found_new and os.path.exists(AUTO_REGULAR_PDF):
         if not os.path.exists(AUTO_REGULAR_BW_PDF): convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
-        if not os.path.exists(AUTO_CUT_PDF): split_pdf_to_columns(AUTO_REGULAR_PDF, AUTO_CUT_PDF)
-        if not os.path.exists(AUTO_CUT_BW_PDF): convert_pdf_to_bw(AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
         if should_scrape:
             save_config({
                 **config,
@@ -210,7 +205,7 @@ def prepare_auto_pdf():
             os.remove(downloaded_path)
 
     if success:
-        build_pdf_variants(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF, AUTO_CUT_PDF, AUTO_CUT_BW_PDF)
+        convert_pdf_to_bw(AUTO_REGULAR_PDF, AUTO_REGULAR_BW_PDF)
         
         if should_scrape or last_title != original_filename:
             save_config({
@@ -226,7 +221,7 @@ def prepare_auto_pdf():
 
 # --- פונקציות עיבוד תצוגה וממשק מתקדם ---
 
-def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color, cut_bw, key_prefix):
+def render_download_view_ui(base_filename, regular_color, regular_bw, key_prefix):
     st.write("### בחר פורמט להורדה:")
     col1, col2 = st.columns(2)
     options = (
@@ -239,139 +234,6 @@ def render_download_view_ui(base_filename, regular_color, regular_bw, cut_color,
                 col.download_button(label, f, dl_name, "application/pdf", width="stretch", key=f"{key_prefix}_dl_{key}")
         else:
             col.error("הקובץ המבוקש נוצר עם שגיאה או אינו קיים.")
-
-
-def split_pdf_to_columns(input_pdf_path, output_pdf_path):
-    """
-    אלגוריתם חיתוך אטומי:
-    מפרק את העמוד למילים בודדות (Words) במקום שורות או בלוקים.
-    מחשב את רוחב הטור בדיוק לפי "השורה הארוכה ביותר" בטור (X מינימלי ומקסימלי של כל המילים).
-    מבצע מחיקה כירורגית למילים פולשות למניעת קטיעת טקסט.
-    """
-    doc = fitz.open(input_pdf_path)
-    out_doc = fitz.open()
-
-    for page_num in range(len(doc)):
-        page = doc[page_num]
-        width = page.rect.width
-        height = page.rect.height
-
-        top_margin = 40
-        bottom_margin = 40
-        crop_height = height - bottom_margin
-
-        # 1. חילוץ ברמת המילה הבודדת 
-        words = page.get_text("words")
-        valid_words = [w for w in words if w[1] >= top_margin and w[3] <= crop_height]
-        
-        if not valid_words:
-            continue
-
-        # 2. מציאת עוגני הטורים לפי הקצה הימני (x2) של כל מילה
-        # בעברית, תחילת השורה היא בצד ימין, ולכן הקצה הימני מיושר ונוח לזיהוי למרות הזיגזג שמאלה
-        x2_values = [w[2] for w in valid_words if (w[2] - w[0]) < width * 0.4]
-        centers = [width * 0.95, width * 0.60, width * 0.25]
-        
-        if x2_values:
-            for _ in range(10):
-                clusters = [[], [], []]
-                for x in x2_values:
-                    idx = int(np.argmin([abs(x - c) for c in centers]))
-                    clusters[idx].append(x)
-                
-                new_centers = [float(np.mean(c)) if c else centers[i] for i, c in enumerate(clusters)]
-                if new_centers == centers:
-                    break
-                centers = new_centers
-                
-        # סידור מהימין לשמאל: [0]=ימין, [1]=אמצע, [2]=שמאל
-        centers.sort(reverse=True) 
-        
-        # 3. שיוך מילים בודדות לטורים
-        col_words = {0: [], 1: [], 2: [], "shared": []}
-        for w in valid_words:
-            w_width = w[2] - w[0]
-            if w_width > width * 0.45: # כותרת רחבה
-                col_words["shared"].append(w)
-            else:
-                idx = int(np.argmin([abs(w[2] - c) for c in centers]))
-                col_words[idx].append(w)
-
-        # שיוך תמונות
-        page_dict = page.get_text("dict")
-        images = [b for b in page_dict.get("blocks", []) if b["type"] == 1]
-        img_cols = {0: [], 1: [], 2: [], "shared": []}
-        for img in images:
-            ib = fitz.Rect(img["bbox"])
-            if ib.width > width * 0.45 or ib.y0 < top_margin or ib.y1 > crop_height:
-                img_cols["shared"].append(img)
-            else:
-                idx = int(np.argmin([abs(ib.x1 - c) for c in centers]))
-                img_cols[idx].append(img)
-
-        # 4. יצירת 3 העמודים
-        for col_idx in [0, 1, 2]:
-            my_words = col_words[col_idx]
-            my_images = img_cols[col_idx]
-            
-            # מניעת עמודים לבנים היכן שאין תוכן
-            if not my_words and not my_images:
-                continue
-
-            new_page = out_doc.new_page(width=width, height=height)
-            new_page.show_pdf_page(new_page.rect, doc, page_num)
-
-            # 5. טיפקס כירורגי למילים זרות
-            # כל המלבנים נכתבים ב-commit אחד; draw_rect נפרד לכל מילה איטי מאוד
-            shape = new_page.new_shape()
-            for other_idx in [0, 1, 2]:
-                if other_idx == col_idx:
-                    continue
-                for w in col_words[other_idx]:
-                    # מחיקה עם קיזוז קל (0.5 פיקסל פנימה) כדי לא לנגוס בניקוד של מילים סמוכות מהטור שלנו
-                    shape.draw_rect(fitz.Rect(w[0]+0.5, w[1], w[2]-0.5, w[3]))
-                for img in img_cols[other_idx]:
-                    shape.draw_rect(fitz.Rect(img["bbox"]))
-            shape.finish(color=(1,1,1), fill=(1,1,1))
-            shape.commit()
-
-            # 6. הגדרת רוחב הטור בדיוק לפי "השורה הארוכה ביותר" בטור עצמו
-            # איסוף כל נקודות ה-X הרלוונטיות
-            xs = [w[0] for w in my_words] + [w[2] for w in my_words] + \
-                 [fitz.Rect(i["bbox"]).x0 for i in my_images] + [fitz.Rect(i["bbox"]).x1 for i in my_images]
-            
-            min_x = min(xs) if xs else 0
-            max_x = max(xs) if xs else width
-            
-            # הגובה יתחשב גם בכותרות המשותפות כדי שלא ייקטעו
-            all_y_words = my_words + col_words["shared"]
-            all_y_imgs = my_images + img_cols["shared"]
-            ys = [w[1] for w in all_y_words] + [w[3] for w in all_y_words] + \
-                 [fitz.Rect(i["bbox"]).y0 for i in all_y_imgs] + [fitz.Rect(i["bbox"]).y1 for i in all_y_imgs]
-                 
-            min_y = min(ys) if ys else top_margin
-            max_y = max(ys) if ys else crop_height
-
-            pad_x = 8
-            pad_y = 15
-            
-            crop_rect = fitz.Rect(
-                max(0, min_x - pad_x),
-                max(0, min_y - pad_y),
-                min(width, max_x + pad_x),
-                min(height, max_y + pad_y)
-            )
-
-            # בדיקה אחרונה שהמלבן בגודל הגיוני
-            if crop_rect.width > 30 and crop_rect.height > 30:
-                new_page.set_cropbox(crop_rect)
-                new_page.set_mediabox(crop_rect)
-            else:
-                out_doc.delete_page(-1)
-
-    out_doc.save(output_pdf_path)
-    out_doc.close()
-    doc.close()
 
 
 def convert_pdf_to_bw(input_path, output_path):
@@ -393,15 +255,6 @@ def convert_pdf_to_bw(input_path, output_path):
         import shutil
         shutil.copy(input_path, output_path)
         print(f"Ghostscript error: {e}")
-
-def build_pdf_variants(regular, regular_bw, cut, cut_bw):
-    split_pdf_to_columns(regular, cut)
-    # שתי המרות Ghostscript הן תהליכים נפרדים, ולכן רצות במקביל באמת
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        jobs = [pool.submit(convert_pdf_to_bw, regular, regular_bw),
-                pool.submit(convert_pdf_to_bw, cut, cut_bw)]
-        for job in jobs:
-            job.result()
 
 def decode_template(template_b64):
     return cv2.imdecode(np.frombuffer(base64.b64decode(template_b64), np.uint8), cv2.IMREAD_GRAYSCALE)
@@ -539,8 +392,6 @@ def main():
                 base_filename=safe_filename,
                 regular_color=AUTO_REGULAR_PDF,
                 regular_bw=AUTO_REGULAR_BW_PDF,
-                cut_color=AUTO_CUT_PDF,
-                cut_bw=AUTO_CUT_BW_PDF,
                 key_prefix="auto"
             )
 
@@ -564,7 +415,7 @@ def main():
                 st.error(f"שגיאה: קבצי התמונות ({' / '.join((*START_IMAGES, END_IMAGE))}) חסרים.")
                 return
 
-            with st.spinner("מבצע משיכה, חיתוך והכנת הטורים..."):
+            with st.spinner("מבצע משיכה ועיבוד של המסמך..."):
                 try:
                     start_b64s, end_b64 = load_marker_images()
 
@@ -580,11 +431,9 @@ def main():
                         
                         output_regular = input_path.replace(".pdf", "_regular.pdf")
                         output_regular_bw = input_path.replace(".pdf", "_regular_bw.pdf")
-                        output_cut = input_path.replace(".pdf", "_cut.pdf")
-                        output_cut_bw = input_path.replace(".pdf", "_cut_bw.pdf")
                         
                         if extract_pdf_by_images(input_path, output_regular, start_b64s, end_b64):
-                            build_pdf_variants(output_regular, output_regular_bw, output_cut, output_cut_bw)
+                            convert_pdf_to_bw(output_regular, output_regular_bw)
                             
                             safe_manual_name = uploaded_file.name
                             if not safe_manual_name.lower().endswith('.pdf'):
@@ -594,8 +443,6 @@ def main():
                             st.session_state["manual_files"] = {
                                 "reg_col": output_regular,
                                 "reg_bw": output_regular_bw,
-                                "cut_col": output_cut,
-                                "cut_bw": output_cut_bw,
                                 "base_name": safe_manual_name
                             }
                             st.success("העיבוד בוצע בהצלחה!")
@@ -627,17 +474,13 @@ def main():
                             
                             output_regular = "temp_regular_drive.pdf"
                             output_regular_bw = "temp_regular_bw_drive.pdf"
-                            output_cut = "temp_cut_drive.pdf"
-                            output_cut_bw = "temp_cut_bw_drive.pdf"
                             
                             if extract_pdf_by_images(downloaded_path, output_regular, start_b64s, end_b64):
-                                build_pdf_variants(output_regular, output_regular_bw, output_cut, output_cut_bw)
+                                convert_pdf_to_bw(output_regular, output_regular_bw)
                                 
                                 st.session_state["manual_files"] = {
                                     "reg_col": output_regular,
                                     "reg_bw": output_regular_bw,
-                                    "cut_col": output_cut,
-                                    "cut_bw": output_cut_bw,
                                     "base_name": safe_manual_name
                                 }
                                 st.success("העיבוד בוצע בהצלחה!")
@@ -659,8 +502,6 @@ def main():
                 base_filename=f["base_name"],
                 regular_color=f["reg_col"],
                 regular_bw=f["reg_bw"],
-                cut_color=f["cut_col"],
-                cut_bw=f["cut_bw"],
                 key_prefix="manual"
             )
 
